@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# R session state
+.Rhistory
+.RData
+.Ruserdata
+
+# renv: lockfile is tracked, library and staging are not
+renv/library/
+renv/staging/
+renv/python/
+renv/local/
+renv/cellar/
+renv/sandbox/
+
+# Quarto intermediate outputs
+*_files/
+.quarto/
+
+# IDE
+.idea/
+.vscode/
+
+# Contreras AF3 archives: 13 GB of Zenodo zips + 185 MB staged trees.
+# Rebuildable via data/contreras_af3/fetch.sh (Zenodo 11546022) + stage.py.
+data/contreras_af3/zips/
+data/contreras_af3/staging/

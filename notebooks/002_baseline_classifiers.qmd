@@ -1,0 +1,362 @@
+---
+title: "002 — Baseline classifiers (mlr3) on the labelled SNI feature matrix"
+author: "Dan MacLean"
+date: "2026-04-23"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Goal
+
+Quantify how well the canonical SNI features distinguish helper from
+sensor proteins on the 18-protein labelled benchmark, using an mlr3
+pipeline under leave-one-out cross-validation (LOOCV). Three feature
+subsets — Scientist, Co-Scientist, and Combined — are evaluated under
+two strategies for the α1-NA features (drop them, or median-impute
+them). Observed LOOCV accuracies and AUCs are then compared against
+permutation null distributions obtained by re-running the same
+pipeline on label-shuffled data.
+
+The idea here is that because we're setting up an `mlr3` factory-style
+classifier pipeline, we can be maximalist about what sub-sets/super-sets
+to look at. We can therefore compare the Co and Scientist features at low effort
+and the effect of the missing value features.
+
+We are optimistic for good classifiers because of the prevalance of single
+features that do excellent sensor/helper classification on there own.
+
+## Hypotheses
+
+1. Multiple single features already give perfect rank separation on
+   this benchmark (notebook 001), so multivariate LOOCV accuracy will
+   be at or near 1.0 for at least the Scientist and Combined subsets
+   under either α1-policy.
+2. The Scientist and Co-Scientist subsets, evaluated on the same 18
+   proteins, will give LOOCV scores that are not distinguishable from
+   each other, since one misclassification at n = 18 corresponds to a
+   change of 1/18 ≈ 0.056 in accuracy.
+3. The permutation null distribution of LOOCV accuracy will be roughly
+   centred on 0.5; empirical p-values for the observed scores will be
+   bounded by 1 / (n_perms + 1) when no shuffled labelling matches.
+
+## Rationale
+
+n = 18 is small. We use (a) LOOCV so every sample serves once as
+test, (b) more than one learner so the result is not a property of a
+single model class, (c) explicit α1-feature handling — drop vs
+median-impute — to separate the contribution of the structurally
+missing features from that of the always-observed features, and (d)
+a permutation null so observed scores can be read against the
+distribution produced by the same pipeline on randomly shuffled
+labels.
+
+------------------------------------------------------------------------
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(mlr3)
+  library(mlr3learners)
+  library(mlr3pipelines)
+  library(here)
+  library(ggplot2)
+  library(tidyr)
+  library(data.table)
+})
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+knitr::opts_chunk$set(fig.path = "../results/figures/002_")
+
+mat_11 <- readRDS(here("data", "feature_matrix_labelled_11.rds"))
+mat_11$class <- factor(mat_11$class, levels = c("sensor", "helper"))
+
+dir.create(here("results"), showWarnings = FALSE, recursive = TRUE)
+```
+
+## 1. Feature subsets and design cells
+
+The "Scientist", "Co-Scientist" and "Both" subsets are taken from
+`SolNRCH_foldome/R/NRC_heatmap_analysis.R`. The α1-NA set is the three
+columns shown in notebook 001 to be NA in 9/9 sensors.
+
+```{r design}
+sci_full   <- c("ipTM_LCB", "Sum_CONTACTS", "S_PROTO", "L_APEX_mean")
+cos_full   <- c("D_MHD_P_mean", "THETA_APEX_mean", "H_ABS_mean", "MU_H_mean")
+both       <- c("BSA_INT_PROTO", "SD_THETA_ROT", "D_APEX")
+combined   <- unique(c(sci_full, cos_full, both))     # 11 features
+
+alpha1_na  <- c("THETA_APEX_mean", "L_APEX_mean", "MU_H_mean")
+
+make_cell <- function(name, features, impute) {
+  list(name = name, features = features, impute = impute)
+}
+
+design <- list(
+  make_cell("scientist_drop_a1",     setdiff(sci_full, alpha1_na),   FALSE),
+  make_cell("scientist_impute_a1",   sci_full,                       TRUE),
+  make_cell("coscientist_drop_a1",   setdiff(cos_full, alpha1_na),   FALSE),
+  make_cell("coscientist_impute_a1", cos_full,                       TRUE),
+  make_cell("combined_drop_a1",      setdiff(combined, alpha1_na),   FALSE),
+  make_cell("combined_impute_a1",    combined,                       TRUE)
+)
+
+design_summary <- do.call(rbind, lapply(design, function(d) {
+  data.frame(
+    cell        = d$name,
+    impute_a1   = d$impute,
+    n_features  = length(d$features),
+    features    = paste(d$features, collapse = ", ")
+  )
+}))
+knitr::kable(design_summary)
+```
+
+## 2. Pipeline helpers
+
+A small set of helpers wraps the mlr3 task / learner / resample
+boilerplate so each design cell × learner combination is one function
+call.
+
+```{r helpers}
+make_task <- function(data, features, target = "class") {
+  d <- as.data.frame(data[, c(target, features), drop = FALSE])
+  TaskClassif$new(id = "sni", backend = d, target = target,
+                  positive = "helper")
+}
+
+build_learner <- function(lrn_id, impute) {
+  base <- lrn(lrn_id, predict_type = "prob")
+  if (lrn_id == "classif.ranger") base$param_set$values$num.trees <- 200
+  if (impute) {
+    g <- po("imputemedian",
+            affect_columns = selector_type(c("numeric", "integer"))) %>>% base
+    GraphLearner$new(g)
+  } else {
+    base
+  }
+}
+
+run_loocv <- function(data, features, lrn_id, impute) {
+  tsk <- make_task(data, features)
+  lrn_obj <- build_learner(lrn_id, impute)
+  rr <- suppressWarnings(resample(tsk, lrn_obj, rsmp("loo")))
+  # AUC is undefined per LOO fold (one observation each); score on the
+  # pooled prediction across folds so the 9-helper / 9-sensor ranking is
+  # used as a single sample.
+  acc_mean <- rr$aggregate(msr("classif.acc"))
+  auc_pool <- rr$prediction()$score(msr("classif.auc"))
+  list(rr = rr,
+       agg = c(classif.acc = unname(acc_mean),
+               classif.auc = unname(auc_pool)))
+}
+```
+
+## 3. Baseline benchmark
+
+Three learners types — `featureless` (predicts the majority class),
+`log_reg` (plain logistic regression), and `ranger` (random forest,
+200 trees) — are run on each of the six design cells. `featureless`
+gives the no-information baseline by bascically calling just the class with the most members as its prediction for everything `log_reg` and `ranger` give two
+contrasting model classes (linear and non-linear ensemble).
+
+```{r benchmark}
+LEARNERS <- c("classif.featureless", "classif.log_reg", "classif.ranger")
+
+set.seed(1)
+bench_results <- do.call(rbind, lapply(design, function(cell) {
+  do.call(rbind, lapply(LEARNERS, function(lrn_id) {
+    res <- tryCatch(
+      run_loocv(mat_11, cell$features, lrn_id, cell$impute),
+      error = function(e) list(agg = c(classif.acc = NA_real_,
+                                       classif.auc = NA_real_))
+    )
+    data.frame(
+      cell    = cell$name,
+      impute  = cell$impute,
+      learner = sub("^classif\\.", "", lrn_id),
+      acc     = unname(res$agg["classif.acc"]),
+      auc     = unname(res$agg["classif.auc"])
+    )
+  }))
+}))
+
+bench_results
+```
+Ok, so our benchmark is helpful. `featureless` scores 0 — not a chance result but an LOOCV artefact: with balanced classes, holding out a helper flips the training majority to sensor (and vice versa), so featureless is wrong every fold. Read it as "no feature information used" rather than a literal 0% accuracy. Past that, the headline is `combined` + `ranger`: both the drop and impute cells hit perfect LOOCV accuracy and AUC, so the full 8–11 feature set is where the real classifier lives. The Scientist-only and Co-Scientist-only subsets are both strong but trail combined by a misclassification or two. The models discern sensors and helpers pretty well.
+
+
+```{r benchmark-table}
+wide_acc <- pivot_wider(bench_results[, c("cell", "learner", "acc")],
+                        names_from = learner, values_from = acc)
+wide_auc <- pivot_wider(bench_results[, c("cell", "learner", "auc")],
+                        names_from = learner, values_from = auc)
+knitr::kable(wide_acc, digits = 3, caption = "LOOCV accuracy")
+knitr::kable(wide_auc, digits = 3, caption = "LOOCV AUC")
+```
+Same thing in a wider table.
+
+## 4. Held-out predictions per protein
+
+For the two "combined" cells (drop α1 vs impute α1), report the
+LOOCV-held-out predicted probability of `helper` for each protein,
+under the random-forest learner. This shows which proteins, if any,
+are misclassified or sit close to the 0.5 boundary. Basically, we'll leave out each protein in turn,
+retrain and see what its $p(helper)$ is.
+
+```{r held-out}
+held_out <- function(data, features, lrn_id, impute) {
+  tsk <- make_task(data, features)
+  lrn_obj <- build_learner(lrn_id, impute)
+  rr <- suppressWarnings(resample(tsk, lrn_obj, rsmp("loo")))
+  pred_dt <- as.data.table(rr$prediction())
+  pred_dt$ID    <- data$ID[pred_dt$row_ids]
+  pred_dt$class <- data$class[pred_dt$row_ids]
+  pred_dt[, .(ID, class, response, prob_helper = prob.helper)]
+}
+
+ho_drop   <- held_out(mat_11, setdiff(combined, alpha1_na),
+                      "classif.ranger", impute = FALSE)
+ho_impute <- held_out(mat_11, combined, "classif.ranger", impute = TRUE)
+
+ho_drop$cell   <- "combined_drop_a1"
+ho_impute$cell <- "combined_impute_a1"
+ho_all <- rbind(ho_drop, ho_impute)
+ho_all <- ho_all[order(ho_all$cell, ho_all$class, -ho_all$prob_helper)]
+knitr::kable(ho_all, digits = 3)
+```
+
+```{r held-out-plot, fig.width=8, fig.height=5}
+ggplot(ho_all, aes(x = prob_helper, y = reorder(ID, prob_helper),
+                   colour = class, shape = response == class)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 2.5) +
+  facet_wrap(~ cell) +
+  scale_colour_manual(values = c(sensor = "#e76f51", helper = "#264653")) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 4),
+                     labels = c(`TRUE` = "correct", `FALSE` = "wrong"),
+                     name = "prediction") +
+  labs(x = "LOOCV held-out P(helper) (ranger)", y = NULL) +
+  theme_minimal(base_size = 10)
+```
+They're all re-predicted correctly and most $p(helper)$ stays appreciably away from the 0.5
+zone of not being so sure.
+
+## 5. Permutation null distribution
+
+Class labels are permuted across the 18 proteins and the LOOCV
+pipeline is re-run on each shuffle. `n_perms = 200` shuffles per
+cell, ranger learner only (chosen for speed; the same approach
+applies to the other learners). Empirical one-sided p-values are
+`(1 + sum(null >= obs)) / (n_perms + 1)`.
+
+Standard 'bootstrap-like' shuffling of labels for 200 reps.
+The idea being that we should see a nice aggregation of
+LOOCV accuracy (and AUC) around 0.5. Which would indicate
+that the random shuffling makes the model unable to recall
+the original labels. Randomly labelled models should not be
+classifiable, only those with real patterns in data should.
+
+The result is cached to `results/permutation_results.rds`; delete
+that file to force recomputation.
+
+```{r permute}
+N_PERMS <- 200
+PERM_CACHE <- here("results", "permutation_results.rds")
+
+run_permutations <- function(data, features, lrn_id, impute,
+                             n_perms, seed) {
+  set.seed(seed)
+  out <- matrix(NA_real_, nrow = n_perms, ncol = 2,
+                dimnames = list(NULL, c("acc", "auc")))
+  for (i in seq_len(n_perms)) {
+    d_perm <- data
+    d_perm$class <- sample(d_perm$class)
+    res <- tryCatch(
+      run_loocv(d_perm, features, lrn_id, impute),
+      error = function(e) list(agg = c(classif.acc = NA_real_,
+                                       classif.auc = NA_real_))
+    )
+    out[i, ] <- c(res$agg["classif.acc"], res$agg["classif.auc"])
+  }
+  as.data.frame(out)
+}
+
+if (file.exists(PERM_CACHE)) {
+  perm_results <- readRDS(PERM_CACHE)
+  message("Loaded cached permutation results from ", PERM_CACHE)
+} else {
+  message("Running ", N_PERMS, " permutations per cell (ranger)...")
+  t0 <- Sys.time()
+  perm_results <- lapply(seq_along(design), function(i) {
+    cell <- design[[i]]
+    obs <- run_loocv(mat_11, cell$features, "classif.ranger", cell$impute)$agg
+    nulls <- run_permutations(mat_11, cell$features, "classif.ranger",
+                              cell$impute, N_PERMS, seed = 100 + i)
+    list(cell = cell$name, obs = obs, nulls = nulls)
+  })
+  names(perm_results) <- vapply(design, `[[`, character(1), "name")
+  saveRDS(perm_results, PERM_CACHE)
+  message("Done in ", round(as.numeric(difftime(Sys.time(), t0, units = "secs"))),
+          " s")
+}
+```
+
+```{r permute-table}
+perm_summary <- do.call(rbind, lapply(perm_results, function(r) {
+  data.frame(
+    cell      = r$cell,
+    obs_acc   = unname(r$obs["classif.acc"]),
+    obs_auc   = unname(r$obs["classif.auc"]),
+    null_acc_mean = mean(r$nulls$acc, na.rm = TRUE),
+    null_auc_mean = mean(r$nulls$auc, na.rm = TRUE),
+    p_acc     = (1 + sum(r$nulls$acc >= r$obs["classif.acc"], na.rm = TRUE)) /
+                (sum(!is.na(r$nulls$acc)) + 1),
+    p_auc     = (1 + sum(r$nulls$auc >= r$obs["classif.auc"], na.rm = TRUE)) /
+                (sum(!is.na(r$nulls$auc)) + 1)
+  )
+}))
+knitr::kable(perm_summary, digits = 3, row.names = FALSE)
+```
+
+```{r permute-plot, fig.width=10, fig.height=6}
+nulls_long <- do.call(rbind, lapply(perm_results, function(r) {
+  data.frame(cell = r$cell,
+             metric = rep(c("acc", "auc"), each = nrow(r$nulls)),
+             value  = c(r$nulls$acc, r$nulls$auc))
+}))
+obs_long <- do.call(rbind, lapply(perm_results, function(r) {
+  data.frame(cell = r$cell,
+             metric = c("acc", "auc"),
+             value  = unname(c(r$obs["classif.acc"], r$obs["classif.auc"])))
+}))
+
+ggplot(nulls_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "grey70", colour = "white") +
+  geom_vline(data = obs_long, aes(xintercept = value),
+             colour = "#ED2939", linewidth = 0.8) +
+  facet_grid(cell ~ metric, scales = "free_x") +
+  labs(x = "Score under permuted labels (red = observed)", y = "Permutations") +
+  theme_minimal(base_size = 10)
+```
+Indeed thats what we see. Most shuffled-label runs sit around 0.5 on both acc and AUC. The red line is our *observed* score (not a significance cut-off) — the p-value is just the fraction of shuffles that reach or exceed it. For most cells no shuffle matches, so p hits the 1/(200+1) ≈ 0.005 floor; where a handful do, p just inches up. Observed scores this far above the shuffle pile indicate a real pattern.
+
+## 6. Conclusion
+
+The combined data and `ranger` models give a great classification of sensors from helpers using the `SNI` features.
+
+## 7. Session
+
+```{r session}
+sessionInfo()
+```

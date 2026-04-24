@@ -1,0 +1,531 @@
+---
+title: "004 — QC of the AF3 hexamer call: Contreras feature matrix vs ground truth"
+author: "Dan MacLean"
+date: "2026-04-24"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(dplyr)
+library(tidyr)
+library(knitr)
+fm_path <- here("results", "004_full_run", "feature_matrix.csv")
+fm <- read.csv(fm_path, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+# pandas writes booleans as "True"/"False" strings — coerce back
+fm$is_triple_deposit <- fm$is_triple_deposit == "True"
+fm$call_correct      <- ifelse(fm$call_correct == "True", TRUE,
+                        ifelse(fm$call_correct == "False", FALSE, NA))
+```
+
+## Aims
+
+1. **Compute** the 11 canonical SNI (Structural Novelty Index)
+   features for every plant-NLR AF3 model deposited by Contreras *et
+   al.* 2024 on Zenodo (89 model files in total).
+2. **Join** those features to a small set of plant NLRs whose
+   activated oligomeric state has been determined experimentally
+   (cryo-EM, mostly).
+3. **Show** how SNI separates a correct AF3 oligomer call from an
+   incorrect one in the cases where we can check it directly.
+4. **Surface** any feature-coverage or naming gaps that would bias a
+   downstream classifier (notebook 005).
+
+## Rationale
+
+The medium-term goal is a classifier that, given an AF3 prediction of
+a plant CC-NLR pulled at 6 copies, says *“this is a real hexameric
+resistosome”* or *“this is a forced hexamer that AF3 has been talked
+into modelling”* (a 6mer **false positive**, 6mer-FP). The
+classifier features are the 11 SNI metrics — symmetry RMSDs,
+contact counts, interface area, α1-helix geometry, MHD–P-loop
+distance, etc. Before training anything, we need to verify that:
+
+- The pipeline runs on every Contreras model without falling over.
+- For the (small) subset of proteins where we *know* the right answer
+  from cryo-EM, the canonical SNI features point in the expected
+  direction when AF3 is forced to model the wrong stoichiometry.
+- We know which features are missing on which proteins, and why,
+  before writing classifier code that will silently drop rows.
+
+This notebook is the experimental record of that verification.
+
+## Materials
+
+### What Contreras *et al.* deposited
+
+Contreras *et al.* 2024 (*Sci Adv* 10, eadr2594; PMID 39504373; data
+on Zenodo `10.5281/zenodo.11546022`) ran AlphaFold-Multimer 3 on a
+panel of plant NLRs, forcing the model to assemble homo-oligomers at
+fixed stoichiometries. Their deposit is a set of 10 zip files we
+will refer to as **archives** throughout this notebook. Each archive
+groups predictions by purpose:
+
+| Archive | What's in it | # protein × stoichiometry rows |
+|:--|:--|:--|
+| `AF_benchmark/` | one AF3 prediction of NbNRC2a hexamer (deposit benchmark) | 1 |
+| `Benchmarks/` | 3 reference proteins (ZAR1, Sr35, NbNRC2a) at hexa **and** penta — the small "does the pipeline behave?" set | 6 |
+| `CC/`, `CCG10/`, `CCR/` | broader CC-NLR panel — each protein modelled at hexa **and** penta | 16 / 12 / 4 |
+| `NRC2_tetramers/` … `NRC2_octamers/` | NbNRC2a forced to assemble at 4, 5, 6, 7 and 8 copies; **10 random AF3 seeds per stoichiometry** — the "gold sweep" | 5 × 1 |
+
+Each protein × stoichiometry × seed prediction lives as a directory
+of AF3 outputs (5 candidate models, summary JSON, full PAE/PDE
+arrays). In notebook 003 we extracted only the top-ranked model per
+seed (`*_model_0.cif` plus `*_summary_confidences_0.json`),
+dropped the 4 alternative models and the bulky raw arrays, normalised
+the seed-naming, and laid the result out at
+`sni_ml/data/contreras_af3/staging/<archive>/<protein>_seed<N>/`. The
+full file count is **89 (model.cif, summary_confidences.json) pairs**
+across the 10 archives.
+
+A **stoichiometry** here means the number of identical NLR copies
+AlphaFold-Multimer was asked to model into the same complex. We refer
+to them as 4-mer, 5-mer (= pentamer), 6-mer (= hexamer), 7-mer,
+8-mer.
+
+### The ground-truth panel
+
+Notebook 003 produced a curated literature table at
+`sni_ml/data/known_oligomer_states.csv` — 26 rows, of which 8 are
+plant NLRs with a published activated-form structure resolved at
+cryo-EM tier-1–3 evidence. Of those 8, **four** also appear in the
+Contreras Zenodo deposit, and so can be cross-checked here:
+
+| Protein | Activated state | Source | Contreras coverage |
+|:--|:--|:--|:--|
+| ZAR1 (Arabidopsis) | pentamer | Wang *et al.* 2019, PDB 6J5T | hexa + penta in `Benchmarks/` |
+| Sr35 (wheat) | pentamer | Zhao *et al.* 2022, PDB 7XC2 | hexa + penta in `Benchmarks/` |
+| NbNRC2 / nbnrc2a (*N. benthamiana*) | hexamer | Madhuprakash *et al.* 2024, PDB 9FP6 | full 4–8 sweep + Benchmarks + AF_benchmark |
+| RPS2 (Arabidopsis) | octamer (≥8) | *Cell* 2026 | hexa + penta in `CCG10/` (no octa modelled) |
+
+The remaining 4 ground-truth proteins (RPP1, ROQ1, MLA13, WAI3) are
+not in the Contreras deposit and are out of scope here.
+
+### The 11 SNI features
+
+The pipeline's canonical feature set (the 11 we will be looking at
+throughout):
+
+- `ipTM_LCB` — AF3 interface-pTM, lower 95 % confidence bound across
+  seeds. *Confidence in the interface AF3 modelled.*
+- `Sum_CONTACTS` — total inter-chain heavy-atom contacts at 3.5 Å.
+  *How densely chains touch.*
+- `BSA_INT_PROTO` — buried surface area of the protomer interface.
+- `SD_THETA_ROT` — standard deviation of inter-chain rotation angle.
+  *0 for a perfect ring; ≫0 when chains splay.*
+- `S_PROTO` — protomer-symmetry RMSD across the ring.
+- `D_APEX` — radial distance from ring axis to the α1 apex.
+- `THETA_APEX_mean` — mean apex tilt (α1 angle).
+- `L_APEX_mean` — mean α1 length.
+- `H_ABS_mean` — mean α1 hydrophobicity.
+- `MU_H_mean` — mean α1 amphipathic moment.
+- `D_MHD_P_mean` — mean intra-protomer distance from the MHD motif
+  to the P-loop. *Requires per-protein motif-coordinate annotations.*
+
+## Methods
+
+### Toolchain audit
+
+Before running anything, we verified the external tools the pipeline
+shells out to. The pipeline source (`resistosome/hmm.py`,
+`resistosome/helix.py`) calls `subprocess.run(['hmmsearch', …])`
+and `subprocess.run(['mkdssp', …])` — i.e. it relies on PATH lookup
+for both binaries. The matrix below is what was confirmed before
+running:
+
+| Tool | Purpose | Resolved binary | Version |
+|:--|:--|:--|:--|
+| `hmmsearch` | MADA HMM search → α1 boundaries | `…/envs/sni-pipeline/bin/hmmsearch` | HMMER 3.4 |
+| `mkdssp` | secondary-structure for α1 fallback | `…/envs/sni-pipeline/bin/mkdssp` | 4.6.1 |
+| `python` | pipeline interpreter | `…/envs/sni-pipeline/bin/python` | 3.11 |
+
+Python deps (`biopython`, `freesasa`, `numpy`, `scipy`, `pandas`,
+`openpyxl`) all install-verified in the same env.
+
+The driver script `sni_ml/data/contreras_af3/run_pipeline_all.sh`
+prepends `…/envs/sni-pipeline/bin` to PATH, then runs `command -v
+hmmsearch mkdssp` as a hard precondition (`exit 2` on miss) before
+launching any pipeline call. This guards against the failure mode
+recorded in the incident below.
+
+#### Incident: the first run silently fell back to DSSP everywhere
+
+The first pipeline invocation in this notebook was launched as
+`/Users/macleand/mamba/envs/sni-pipeline/bin/python run_pipeline.py …`.
+That picks up the env's Python and its installed packages, but does
+**not** add the env's `bin/` to PATH — so `subprocess.run(['hmmsearch',
+…])` from inside the pipeline got *command not found* on every call.
+The pipeline silently fell back to DSSP for α1 boundaries on every
+protein in every archive (the fallback is `--hmm_fallback_dssp`,
+which is on). The α1-derived features
+(`THETA_APEX_mean`, `L_APEX_mean`, `MU_H_mean`) were therefore
+DSSP-derived in every row of the first matrix, not MADA-derived.
+
+The discrepancy between HMM and DSSP α1 boundaries is non-trivial
+for proteins whose α1 includes a defined MADA motif at the very
+N-terminus: for NbNRC2a hexamer, `THETA_APEX_mean` changed from
+≈18° (DSSP) to ≈47° (HMM), and `L_APEX_mean` changed from ≈51
+residues (DSSP, picking up the entire helical run) to 21 residues
+(HMM, restricted to the MADA motif). A side-by-side diff is at
+`results/004_full_run/feature_matrix_dsspfallback.csv` (frozen
+copy of the first run) and `results/004_full_run/feature_matrix.csv`
+(corrected, current). Critically, the **non-α1 separators**
+(`ipTM_LCB`, `Sum_CONTACTS`, `BSA_INT_PROTO`, `SD_THETA_ROT`,
+`S_PROTO`, `D_APEX`) are bit-identical between the two runs — they
+do not depend on α1 boundaries — so the headline TP/FP findings in
+R3–R4 below were unaffected. Lesson recorded in the driver as the
+mandatory tool-presence check; the bad matrix is preserved as a
+diff target rather than deleted.
+
+### Pipeline run
+
+The driver script
+`sni_ml/data/contreras_af3/run_pipeline_all.sh` calls
+`SolNRCH_foldome/resistosome_pipeline/run_pipeline.py` once per
+archive. Running per-archive (rather than over a single flat input
+directory) avoids filename collisions on
+`nbnrc2a_..._seed1`, which appears in three archives
+(`AF_benchmark`, `Benchmarks`, `NRC2_hexamers`).
+
+```
+export PATH=/Users/macleand/mamba/envs/sni-pipeline/bin:$PATH
+command -v hmmsearch mkdssp || exit 2
+
+for arc in AF_benchmark Benchmarks CC CCG10 CCR \
+           NRC2_tetramers NRC2_pentamers NRC2_hexamers \
+           NRC2_heptamers NRC2_octamers:
+    python run_pipeline.py \
+        --input_dir  staging/<arc>/ \
+        --output_dir results/004_full_run/<arc>/ \
+        --mhd_csv    .../NRCH_MHD_nlrexp_coords.csv \
+        --ploop_csv  .../NRCH_ploop_nlrexp_coords.csv \
+        --nbarc_csv  .../NRCH_clade_filtered_..._coords.csv \
+        --hmm        .../MADA.hmm \
+        --hmm_fallback_dssp \
+        --workers 8 \
+        --log_level WARNING
+```
+
+The pipeline groups input directories by stripping the `_seed<N>`
+suffix from the directory name. The result is one row per
+`(protein, predicted_oligomer)` per archive, with `N_replicates`
+equal to the number of seeds in that group. The NRC2_*mers archives
+each carry `N_replicates = 10`; everything else `N_replicates = 1`.
+
+Per-archive runtime was a few seconds; full sweep ≈ 2 min wall-clock
+on this machine. Logs are at
+`results/004_full_run/master.log` (driver) and
+`results/004_full_run/<archive>/run.log` (pipeline stderr).
+
+### Building the feature matrix
+
+The merge step
+`sni_ml/data/contreras_af3/build_feature_matrix.py`:
+
+1. Concatenates the 10 per-archive `resistosome_analysis_summary.csv`
+   files (58 columns each), prepending an `archive` column.
+2. Parses the pipeline's `ID` field to recover `protein` (lowercased,
+   stripped of the `_ccnbarc / _<oligo-token> / _oleic` decoration
+   Contreras attached) and `predicted_oligomer` (`tetra→4 …
+   octa→8`; no token = Contreras default = 6).
+3. Joins to `data/known_oligomer_states.csv` on lowercased `protein`
+   to attach `gt_oligomer`, evidence tier, and other metadata.
+4. Adds `call_correct = (predicted_oligomer == gt_oligomer)` for
+   rows where ground truth is known; `NA` otherwise.
+5. Adds `is_triple_deposit = TRUE` for the three rows that hold the
+   same NbNRC2a hexamer model under different archive provenance
+   (`AF_benchmark`, `Benchmarks`, `NRC2_hexamers`).
+
+The output is `results/004_full_run/feature_matrix.csv` (also
+`.xlsx`). Every result and table below is computed from that one
+file.
+
+## Results
+
+### R1. Matrix shape and ground-truth coverage
+
+```{r matrix-shape}
+cat("rows:", nrow(fm), "  cols:", ncol(fm), "\n")
+cat("rows with GT match:", sum(!is.na(fm$gt_oligomer)), "\n")
+cat("rows w/o  GT match:", sum( is.na(fm$gt_oligomer)), "\n")
+cat("triple-deposit rows:", sum(fm$is_triple_deposit), "\n")
+```
+
+44 rows from 89 staged models — the difference is the seed
+collapsing the pipeline does inside the NRC2 sweep. 14 rows have a
+joined ground-truth state; the remaining 30 are CC/CCG10/CCR
+proteins and a handful of others where we have no published
+activated structure.
+
+### R2. What is in the matrix, by archive
+
+```{r matrix-layout}
+fm |>
+  mutate(stoich = recode(predicted_oligomer,
+                         `4`="tetra", `5`="penta", `6`="hexa",
+                         `7`="hepta", `8`="octa")) |>
+  group_by(archive, protein) |>
+  summarise(stoichiometries = paste(sort(unique(stoich)), collapse=", "),
+            n_seeds_total   = sum(N_replicates),
+            .groups = "drop") |>
+  arrange(archive, protein) |>
+  kable()
+```
+
+The CC, CCG10 and CCR archives each cover their proteins at hexa
+**and** penta, which means we can ask the
+"forced-wrong-stoichiometry" question of every one of them — even
+the ones with no ground truth — because at most one of the two
+calls can be right and the SNI features should reflect that.
+
+### R3. Hexamer call against ground truth
+
+For the 14 GT-bearing rows, compare the predicted stoichiometry to
+the cryo-EM-determined oligomer and look at the four most
+discriminating SNI features. **TP** = AF3 was forced at the right
+stoichiometry; **FP** = AF3 was forced at a wrong one.
+
+```{r call-table}
+fm |>
+  filter(!is.na(gt_oligomer)) |>
+  mutate(call = ifelse(call_correct, "TP", "FP")) |>
+  select(archive, protein, predicted_oligomer, gt_oligomer,
+         N_replicates, ipTM_LCB, Sum_CONTACTS, SD_THETA_ROT, S_PROTO,
+         is_triple_deposit, call) |>
+  arrange(protein, archive, predicted_oligomer) |>
+  kable(digits = 3)
+```
+
+Reading the four candidate-separator columns by eye, with no
+statistical test applied:
+
+- **ZAR1**: penta (TP) vs hexa (FP) — `SD_THETA_ROT` 0.07 vs 14.1,
+  `S_PROTO` 0.03 vs 1.45, `Sum_CONTACTS` 299 vs 152. Numerically
+  large gap on each.
+- **NbNRC2a**: hexa (TP, n=10 seeds) vs penta (FP, n=1 in
+  Benchmarks) — `SD_THETA_ROT` 0.13 vs 0.17, `S_PROTO` 0.05 vs
+  0.07. Numerically small gap, in the same direction as ZAR1.
+- **Sr35**: penta (TP) vs hexa (FP) — `SD_THETA_ROT` 0.10 vs 0.17,
+  `S_PROTO` 0.07 vs 0.07. Small gap on `SD_THETA_ROT`, no gap on
+  `S_PROTO`.
+- **RPS2**: both rows are forced FPs (the panel only modelled hexa
+  and penta, neither matches the GT octamer); we record the
+  feature values for future comparison.
+
+These are observations from the table only. Whether the gaps are
+robust enough to discriminate TP from FP across proteins is a
+question for 005's EDA, not for this notebook.
+
+### R4. The NbNRC2a stoichiometry sweep — the gold panel
+
+The `NRC2_tetramers/` … `NRC2_octamers/` archives are the single
+most informative dataset in this project: the same protein, ground
+truth = 6, AF3 forced at 4, 5, 6, 7 and 8, each at 10 random seeds.
+Anything that separates 6 from {4, 5, 7, 8} *within* this protein is
+a candidate 6mer-FP signal.
+
+```{r nrc-sweep}
+fm |>
+  filter(grepl("^NRC2_", archive)) |>
+  arrange(predicted_oligomer) |>
+  select(archive, predicted_oligomer, N_replicates,
+         ipTM_LCB, Sum_CONTACTS, BSA_INT_PROTO,
+         SD_THETA_ROT, S_PROTO, D_APEX,
+         THETA_APEX_mean, L_APEX_mean,
+         H_ABS_mean, MU_H_mean, D_MHD_P_mean) |>
+  kable(digits = 3,
+        caption = "NbNRC2a 4/5/6/7/8-mer × 10 seeds, all 11 SNI features.")
+```
+
+### R5. The triple-deposited NbNRC2a hexamer
+
+The same NbNRC2a hexamer model_0 (seed 1) appears in three places:
+the `AF_benchmark/` archive (deposit-level benchmark), the
+`Benchmarks/` archive (paper-level benchmark), and as seed 1 of the
+10-seed `NRC2_hexamers/` sweep. The matrix carries all three rows.
+
+```{r triple}
+fm |>
+  filter(is_triple_deposit) |>
+  select(archive, protein, predicted_oligomer, N_replicates,
+         ipTM_LCB, Sum_CONTACTS, BSA_INT_PROTO,
+         SD_THETA_ROT, S_PROTO, D_APEX) |>
+  kable(digits = 3)
+```
+
+The `NRC2_hexamers` row is the canonical aggregate (10 seeds, with
+`_sd` columns reflecting between-seed variance). The other two are
+single-seed re-runs deposited for benchmarking.
+
+**Decision applied in 005:** keep the `NRC2_hexamers` row for any
+across-protein analysis (it is the only one with replicate variance
+information); drop the `AF_benchmark` and `Benchmarks` hexamer rows
+from classifier training so NbNRC2a is not triple-counted. The two
+duplicates remain in the matrix with `is_triple_deposit = TRUE` so
+they can be inspected for deposit-internal consistency.
+
+### R6. Feature coverage and which proteins fell back to DSSP
+
+```{r coverage}
+SNI <- c("ipTM_LCB","Sum_CONTACTS","BSA_INT_PROTO","SD_THETA_ROT",
+         "S_PROTO","D_APEX","THETA_APEX_mean","L_APEX_mean",
+         "H_ABS_mean","MU_H_mean","D_MHD_P_mean")
+fm |>
+  select(archive, protein, predicted_oligomer, all_of(SNI)) |>
+  pivot_longer(all_of(SNI), names_to = "feature", values_to = "v") |>
+  group_by(feature) |>
+  summarise(n_present = sum(!is.na(v)),
+            n_missing = sum(is.na(v)),
+            .groups   = "drop") |>
+  arrange(desc(n_missing)) |>
+  kable(caption = "Per-feature presence across the 44 rows.")
+```
+
+Two coverage issues to flag because they will bias any downstream
+model if not addressed:
+
+- **`D_MHD_P_mean`** is `NA` on every row that is not in the
+  NRC-network panel. The pipeline computes this distance from
+  per-protein motif-coordinate CSVs (`--mhd_csv`, `--ploop_csv`),
+  which currently cover only NRC-family proteins. The CC, CCG10,
+  CCR, ZAR1 and Sr35 rows therefore have a hole in feature 11.
+- **MADA HMM hit/miss is per-protein.** With `hmmsearch` correctly
+  on PATH (see *Methods → Incident*), the MADA HMM still misses some
+  proteins on biological grounds — those proteins' α1 is then defined
+  by the DSSP fallback, which is less precise. The `hmm/hmmsearch_domtbl.out`
+  artefact in each archive directory records which proteins hit:
+
+```{r hmm-per-protein}
+arc_dirs <- list.files(here("results", "004_full_run"),
+                       full.names = TRUE)
+arc_dirs <- arc_dirs[file.info(arc_dirs)$isdir]
+hits <- lapply(arc_dirs, function(d) {
+  dt <- file.path(d, "hmm", "hmmsearch_domtbl.out")
+  if (!file.exists(dt)) return(NULL)
+  lines <- readLines(dt); lines <- lines[!grepl("^#", lines)]
+  if (length(lines) == 0) return(NULL)
+  data.frame(archive = basename(d),
+             target  = sub("\\s.*", "", lines),
+             stringsAsFactors = FALSE)
+})
+hits_df <- do.call(rbind, hits)
+hits_df |>
+  mutate(protein = sub("_ccnbarc.*|_oleic.*", "", target)) |>
+  group_by(archive) |>
+  summarise(MADA_hits = paste(sort(unique(protein)), collapse = ", "),
+            .groups = "drop") |>
+  kable(caption = "Proteins that hit MADA per archive (everything else used the DSSP fallback for α1).")
+```
+
+In our 14 GT-bearing rows: nbnrc2a and ZAR1 hit MADA in every
+archive they appear in; **Sr35 has zero MADA hits even with HMMER
+working correctly** (its α1 sequence falls below the MADA HMM's
+default detection threshold). RPS2's α1 also did not hit MADA. So
+the borderline behaviour of Sr35 in R3 — `SD_THETA_ROT` and
+`S_PROTO` close between hexa and penta — is now interpretable as a
+real signal, not a tooling artefact: Sr35 *intrinsically* has an α1
+that doesn't conform to the MADA pattern, and that's also where some
+of its α1-derived features are computed via DSSP rather than HMM.
+
+## Conclusions
+
+### Where we are
+
+After 003 and 004 we have a single artefact that pairs:
+
+- a **curated literature ground truth** of plant NLR oligomeric
+  states (`sni_ml/data/known_oligomer_states.csv`, 8 tier-1–3
+  cryo-EM entries plus the in-house 18-protein NRC benchmark, all
+  graded under the v0.1 rubric locked 2026-04-23), with
+- the **Contreras *et al.* 2024 AF3 multimer models** for those NRCs
+  computed under controlled forced-stoichiometry conditions (89
+  model_0 structures across 10 archives, including the gold
+  4/5/6/7/8-mer sweep of NbNRC2a at 10 seeds per stoichiometry),
+
+joined into a **single 44-row feature matrix** at
+`sni_ml/results/004_full_run/feature_matrix.csv` carrying all 11
+canonical SNI features, ground-truth labels where they exist, and
+provenance flags (`archive`, `is_triple_deposit`, `call_correct`).
+
+The 14 GT-bearing rows in R3 and R4 are summarised by eye only —
+this notebook does not run any statistical test, plot, or formal
+separation analysis. Reading the tables, the values for ZAR1
+penta-vs-hexa appear to differ on several features in the direction
+we would expect; the NbNRC2a sweep shows the tetramer collapsing
+heavily relative to the other stoichiometries; the Sr35 hexa-vs-penta
+split looks small. Whether any of this is robust enough to support a
+6mer-FP signal is a question for the EDA in **005**, in the same
+shape as 001 — distributions, pairwise feature-space plots, and
+some explicit measure of separation across the GT-bearing and
+GT-less rows. We deliberately do not draw conclusions about feature
+discrimination here.
+
+What 004 does establish is the **input for that EDA**: a
+GT-anchored, provenance-tagged, replicate-aware feature matrix
+covering the 89 Contreras model_0 structures, with the toolchain and
+joins documented end-to-end. This is the launch point for 005.
+
+### Decisions carried forward
+
+These are the concrete things this notebook fixes for the rest of
+the project. Each is actionable in 005.
+
+1. **Feature matrix is canonical.**
+   `results/004_full_run/feature_matrix.csv` is the single source of
+   truth for downstream analysis. Re-running this notebook with
+   different staging will overwrite it deterministically.
+2. **Triple-deposit dedup rule.** Drop
+   `archive ∈ {AF_benchmark, Benchmarks}` rows where
+   `protein == "nbnrc2a"` and `predicted_oligomer == 6`. Keep the
+   `NRC2_hexamers` row.
+3. **Sr35 / RPS2 α1 strategy.** Two GT-bearing proteins
+   intrinsically miss the MADA HMM (confirmed against
+   `hmm/hmmsearch_domtbl.out`, not a tooling artefact); their α1
+   features come from the DSSP fallback. In 005 either (a) accept
+   the DSSP-fallback values and document the difference, or (b) tune
+   the MADA HMM threshold (`-E`/`--incE`) so non-canonical α1s like
+   Sr35's hit. Option (a) is the simpler and more defensible default.
+4. **`D_MHD_P_mean` decision.** Three options to pick between in
+   005, recorded here so the choice is explicit:
+   (a) extend `--mhd_csv` and `--ploop_csv` annotations to non-NRC
+   proteins via an HMM-driven motif scan;
+   (b) accept 10/11 features for the affected rows and document the
+   missingness;
+   (c) drop the feature from the QC set entirely. Option (a) is the
+   most defensible scientifically but takes the most work.
+5. **Per-seed analysis path.** The NRC2_*mers `_sd` columns
+   summarise between-seed variance, but the per-seed JSONs at
+   `results/004_full_run/NRC2_*/per_structure_json/<id>_seed<N>_results.json`
+   carry the full per-seed feature values (n = 50 for NbNRC2a alone)
+   and are the right input for any seed-aware modelling in 005.
+
+## File index
+
+| Path (relative to `sni_ml/`) | What |
+|:--|:--|
+| `data/contreras_af3/run_pipeline_all.sh` | per-archive driver — runs `run_pipeline.py` 10× |
+| `data/contreras_af3/build_feature_matrix.py` | concatenates per-archive CSVs, parses ID, joins GT |
+| `results/004_full_run/<archive>/resistosome_analysis_summary.{csv,xlsx}` | per-archive aggregate (1 row per protein × oligomer) |
+| `results/004_full_run/<archive>/per_structure_json/` | per-seed JSON (10 + 1 aggregated per protein × oligomer) |
+| `results/004_full_run/<archive>/run.log` | per-archive pipeline stderr/stdout |
+| `results/004_full_run/master.log` | driver loop log (per-archive exit codes) |
+| `results/004_full_run/feature_matrix.csv` | merged + GT-joined matrix (44 rows × 60+ cols), HMM-correct |
+| `results/004_full_run/feature_matrix.xlsx` | same, Excel form |
+| `results/004_full_run/feature_matrix_dsspfallback.csv` | frozen first-run matrix where hmmsearch was off PATH; kept as a diff target for the *Methods → Incident* note |
+| `results/004_full_run/<archive>/hmm/hmmsearch_domtbl.out` | per-archive MADA HMM hits (which proteins got HMM α1 vs DSSP fallback) |
+
+External resources: the Contreras Zenodo deposit
+`10.5281/zenodo.11546022`; the resistosome pipeline lives at
+`SolNRCH_foldome/resistosome_pipeline/`; the curated literature
+ground-truth table is `sni_ml/data/known_oligomer_states.csv`.

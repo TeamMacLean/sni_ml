@@ -1,0 +1,477 @@
+---
+title: "003 — Data provenance: building a defensible AF3 6mer ground-truth set"
+author: "Dan MacLean"
+date: "2026-04-24"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Goal
+
+This notebook is a **lab-book entry**: it records, in the order it
+happened, every step of the data-gathering chain that underpins the
+forthcoming QC analysis (notebook 004). Nothing in here computes SNI
+or trains a classifier. The aim is that collaborator can read this single file and reproduce, end-to-end:
+
+1. the rubric we pre-registered for grading the oligomeric state of a
+   plant NLR;
+2. the literature sweep that fed it;
+3. the curated table of "known states" we now defend;
+4. the PDB IDs we resolved for each entry;
+5. the public AF3-prediction archive (Contreras *et al.* 2024) that
+   gives us a same-protein-different-stoichiometry test set without
+   running AF3 ourselves;
+6. the staging conventions that make those archives consumable by the
+   `resistosome_pipeline`;
+7. the environment and a first sanity-check run of the pipeline on
+   Contreras inputs.
+
+Each section names the exact files, scripts, and external IDs
+involved. Intermediate decisions (and the judgement calls behind them)
+are flagged inline.
+
+## Why we need this
+
+The supervised-learning work in notebooks 001/002 classifies NRC
+helpers vs partner sensors on an 18-protein labelled benchmark. That
+is **not** the question of scientific interest — it is a within-NRC
+proxy for the question of interest, which is:
+
+> When AF3 is given six copies of an NLR, is the resulting hexamer a
+> true-positive (matches an experimentally-determined hexamer) or a
+> false-positive (the protein's real activated form is not a hexamer
+> at all)?
+
+To answer that question we need NLRs whose activated oligomeric state
+has been determined experimentally, and AF3 6mer predictions for
+those proteins. Sections A–D below build the first; sections G–I
+build the second.
+
+---
+
+## A. Pre-registration: the curation rubric
+
+Before pulling any literature we wrote and locked
+`data/known_oligomer_states_rubric.md` (v0.1, locked 2026-04-23). The
+purpose is to remove cherry-picking discretion from the curator
+(future-us, or anyone). Key choices:
+
+- **What we grade**: the *activated / effector-bound* form, because
+  that is what AF3 is being asked to predict when given six copies. An
+  inactive / autoinhibited structure does **not** set `known_state`.
+- **`known_state` vocabulary**: `monomer | dimer | trimer | tetramer
+  | pentamer | hexamer | heptamer | octamer_plus | unknown`. There is
+  deliberately no `mixed`. If two stoichiometries are reported for one
+  protein we call from the higher-resolution / effector-bound /
+  more-recent structure; the disagreement is logged in `notes`.
+- **State-setting evidence tiers**:
+  1. `cryo-EM_highres` — activated complex resolved at ≤4 Å with
+     visible protomer count
+  2. `cryo-EM_lowres`  — 4–10 Å, protomer count visible
+  3. `crystal`         — X-ray of the activated oligomeric complex
+- **Non-state-setting evidence tiers** (recorded but never set
+  `known_state`): `XL-MS`, `functional_only`, `homology`. Native-MS
+  and SEC-MALS are explicitly excluded.
+- **Conflicts**: preprints included only if a PDB/EMDB deposit is
+  verifiable; otherwise excluded under §G of the rubric.
+
+The same rubric is also applied symmetrically to the existing
+18-protein labelled benchmark (§I of the rubric). That regrade
+**does not modify** the helper/sensor labels used in notebooks
+001/002; it lives alongside them, answering a different question.
+
+A parallel metazoan calibration set is kept under the same rubric in
+`data/known_oligomer_states_metazoan.csv` (planned; metazoan triage is
+still pending — see §M of this notebook).
+
+## B. PubMed sweep — five pre-registered queries
+
+Five queries were committed under §K of the rubric on 2026-04-23. Any
+query added after that date is tagged `post_hoc` in the audit log.
+
+| Tag | Scope | Hits |
+|----:|:------|----:|
+| **P1** | plant NLR × structural method (`cryo-EM`/`crystal`/`X-ray structure`) | 37 |
+| **P2** | resistosome-centric (`"resistosome"` and variants) | 102 |
+| **P3** | named-gene sweep (curated list of 13 plant NLRs we already expect structures for; ZAR1, Sr35, RPP1, etc.) | 101 |
+| **M1** | metazoan calibration — NAIP/NLRC4 only (NLRP3 deliberately excluded) | 205 |
+| **M2** | metazoan calibration — apoptosome family | 153 |
+
+Total 598 raw, **536 unique** PMIDs after dedup. Honesty notes: P3 is
+a curation decision, not a derivation; that bias is acknowledged in
+the rubric so it can be challenged.
+
+The mechanical pipeline (re-runnable from `data/pubmed_raw/triage.py`)
+is roughly:
+
+```python
+# Pseudocode — see data/pubmed_raw/triage.py for the real thing.
+for query in [P1, P2, P3, M1, M2]:
+    pmids   = curl(esearch, query)              # → P{1..5}_esearch.json
+    summary = curl(esummary, pmids, batches=5)  # → esummary_*.json
+    abstract = curl(efetch,  pmids, batches=5)  # → efetch_*.xml
+unique = sorted(set.union(*query_pmids))         # → unique_pmids.json (536)
+abstracts = parse_titles_abstracts_pubtypes_etc()# → abstracts.json
+```
+
+## C. Triage — mechanical first pass + human survivor pass
+
+Each unique PMID is dispositioned by `triage.py` using a closed set of
+9 categories:
+
+`included | not_plant_NLR | homology_only | no_structure | inactive_only | review | duplicate | ambiguous | needs_human_review`
+
+Mechanical rules read titles + abstracts + publication types; rows
+that fail every rule are tagged `needs_human_review`. The 20 strongest
+plant hits (high P1+P2+P3 overlap) were then reviewed by hand and
+written into the audit log columns `final_disposition` and
+`manual_notes`. Outputs:
+
+- `data/known_oligomer_states_audit.csv` — one row per unique PMID,
+  full provenance.
+- `data/pubmed_raw/abstracts.json` — full title/abstract/pubtypes
+  cache for re-grading.
+
+After the manual pass the 8 plant hits that survived as
+state-setting structural papers were promoted into the curated table
+in §D. **Two sets of work are deferred**: 97 weak-plant survivors and
+287 metazoan PMIDs are still in `ambiguous` and have not yet been
+human-reviewed.
+
+## D. The curated literature table — 8 entries
+
+```{r setup, include=FALSE}
+library(here)
+library(dplyr)
+library(knitr)
+```
+
+```{r curated-table}
+known <- read.csv(here("data", "known_oligomer_states.csv"),
+                  stringsAsFactors = FALSE)
+
+literature <- known |>
+  filter(in_current_18 == "FALSE") |>
+  select(ID, protein_family, organism, known_state, evidence_tier,
+         source_pmid, source_pdb, usable_for_analysis)
+
+kable(literature, caption = "Literature plant NLR entries (8). All graded under v0.1 rubric.")
+```
+
+Three of these required explicit judgement calls; they are flagged
+inline in the `notes` column of the full CSV:
+
+- **MLA13** (PMID 39948409, EMBO J 2025). The published cryo-EM is a
+  1:1 effector heterodimer. We did **not** call this `monomer`. The
+  rubric says: absence of a resistosome in this purification is not
+  evidence that the protein cannot form one in another condition.
+  Hence `known_state = unknown`, `evidence_tier = cryo-EM_highres`,
+  with the heterodimer logged in `notes`.
+- **NRC4 preprint** (PMID 38187616, bioRxiv) was **excluded** under
+  rubric §G — preprints are only included if a PDB/EMDB deposit is
+  verifiable, and this one's deposit was not at the time of curation.
+- **RPS2** (PMID 41864205, *Cell* 2026, alongside WAI3): the abstract
+  reports an octameric RPS2 complex but no separate RPS2-only PDB
+  deposit surfaced via NCBI elink at curation time. Recorded with
+  `source_pdb` blank and a flagged `notes` entry.
+
+## E. Resolving PDB IDs
+
+Initial attempt: query the RCSB search API directly for entries
+citing a given PMID via
+`rcsb_primary_citation.pdbx_database_id_PubMed`. This returned
+`HTTP 400 — search is not enabled on attribute`. The same was true of
+`citation.pdbx_database_id_PubMed`. The RCSB JSON-search interface
+does not expose PMID as a searchable citation field.
+
+The working pivot is:
+
+```bash
+# Pseudocode — for each curated PMID:
+elink   db=pubmed dbfrom=pubmed db=structure id=$PMID  # → MMDB UIDs
+esummary db=structure id=$mmdb_uids                    # → PDB codes (PdbAcc)
+```
+
+Resolved (full IDs in `data/pdb_lookup/mmdb_to_pdb.json`):
+
+| Protein | PDB IDs |
+|:--------|:--------|
+| AtZAR1  | 6J5T, 6J6I |
+| Sr35    | 7XC2, 7XX2, 7XVG, 7XE0, 7XDS |
+| RPP1    | 7CRC, 7CRB, 7DFV |
+| ROQ1    | 7JLX, 7JLV, 7JLU |
+| NbNRC2  | 9FP6 (active), 8RFH (resting) |
+| WAI3    | 9H73, 9H4I, 9H2L (RPS2 likely grouped here) |
+| MLA13   | 9FYC |
+
+## F. Symmetric regrade of the 18-protein benchmark
+
+The same rubric was applied to the 18 proteins used in
+notebooks 001/002. Most stay `known_state = unknown` (functional
+helper/sensor classification ≠ structural evidence). Two NRC entries
+inherit the NbNRC2 hexamer call:
+
+```{r in18}
+in18 <- known |>
+  filter(in_current_18 == "TRUE") |>
+  count(class = known_state, name = "n")
+kable(in18, caption = "Regraded 18-protein benchmark by known_state.")
+```
+
+Two entries (`cnl_11990`, `rpa1`) were flagged
+`usable_for_analysis = FALSE` per Dan's call: identity unverified
+during curation, so they are recorded but excluded from any downstream
+analysis. The notebook-002 helper/sensor labels are **not** modified.
+
+## G. Looking for AF3 predictions in public databases
+
+We scoped before generating: is there a public archive of AF3
+multimer predictions we could use without running AF3 ourselves?
+
+- **AlphaFold DB** (alphafold.ebi.ac.uk): AF2 monomers only. Not
+  useful for the 6mer question.
+- **AF3 Server outputs**: not centrally archived; per-paper.
+- **Per-paper supplementary on Zenodo**: yes, in some cases.
+
+The hit was Contreras *et al.* 2024 (Sci Adv, PMID 39504373, DOI
+`10.1126/sciadv.adr2594`) — the same paper that defines our NbNRC2
+hexamer ground truth. Their GitHub
+(`github.com/amiralito/NRC2Hexamer`) points at two Zenodo deposits;
+the second one is the relevant archive of AF3 outputs.
+
+## H. The Contreras Zenodo (10.5281/zenodo.11546022)
+
+17.1 GB across 11 files. The metadata workbook `Data S1.xlsx` (also
+copied to `data/contreras_af3/Data_S1.xlsx`) lists 29 NLRs across 5
+sheets. Pulled via `data/contreras_af3/fetch.sh`:
+
+```bash
+# Each file of the deposit, resumable, into data/contreras_af3/zips/
+for f in NRC2_{tetra,penta,hexa,hepta,octa}mers.zip \
+         Benchmarks.zip AF_benchmark.zip CC.zip CCG10.zip CCR.zip; do
+    curl -L --fail --retry 3 -C - \
+         -o zips/$f \
+         "https://zenodo.org/records/11546022/files/$f"
+done
+```
+
+The five sheets of `Data_S1.xlsx` map onto the archives as follows:
+
+| Sheet | Content | In Zenodo? |
+|---:|:----|:----|
+| 1. AlphaFold benchmark | NbNRC2a × {AF3+lipids, AF3, AF2} | partial — AF3 only |
+| 2. NRC2 benchmark | NbNRC2a × **{4,5,6,7,8}-mer × 10 seeds** = 50 models | yes — `NRC2_*mers.zip` |
+| 3. NRCs | 11 NRC helpers × {5,6}-mer | **NO** — metrics reported, structures not deposited |
+| 4. cryo-EM benchmark | NbNRC2a / AtZAR1 / Sr35 × {5,6}-mer | yes — `Benchmarks.zip` |
+| 5. CC-types NLRs | 8 CC-NLR + 6 CCG10-NLR + 2 CCR-NLR × {5,6}-mer | yes — `CC.zip`, `CCG10.zip`, `CCR.zip` |
+
+So the actually-usable inventory is **89 prediction entries**: 50 of
+the NbNRC2a stoichiometry sweep, 6 cryo-EM benchmark, 32 CC-types,
+plus one duplicate hexamer in `AF_benchmark.zip`.
+
+### Coverage of our literature ground truth
+
+Cross-referencing §D against Contreras' panel:
+
+| GT protein | GT state | In Contreras? | Stoichs predicted | Use |
+|:--|:--|:-:|:-:|:--|
+| AtZAR1 | pentamer | ✅ | {5, 6} | TP @ 5, FP @ 6 |
+| Sr35 | pentamer | ✅ | {5, 6} | TP @ 5, FP @ 6 |
+| **NbNRC2** | **hexamer** | ✅ | **{4, 5, 6, 7, 8}** × 10 seeds | TP @ 6 plus FP at every other stoich; the gold dataset |
+| RPS2 | octamer⁺ | ✅ | {5, 6} | both wrong-stoich; "AF3 underestimates" only |
+| RPP1 | tetramer | ❌ | — | gap (TNL, out of Contreras scope) |
+| ROQ1 | tetramer | ❌ | — | gap (TNL) |
+| MLA13 | unknown | ❌ | — | gap (barley CNL) |
+| WAI3 | octamer⁺ | ❌ | — | gap (wheat CCG10) |
+
+**Decision**: we are **not** running AF3 ourselves on the four gap
+proteins. AF3 Server jobs at this stoichiometry size are long, prone
+to queue failures, and would be an open-ended commitment. The QC
+notebook will be scoped to what Contreras gives us; the gaps are
+documented here as known limitations.
+
+## I. Staging Contreras into the resistosome pipeline
+
+Each Contreras AF3 prediction is a directory of ~5–170 MB containing:
+
+```
+fold_<protein>_..._<seed-token>/
+    <stem>_model_0.cif                      # the top-ranked model
+    <stem>_summary_confidences_0.json       # ipTM, pTM, chain pTM
+    <stem>_full_data_0.json                 # ~170 MB, atomic confidences
+    <stem>_model_{1,2,3,4}.cif              # alternate samples
+    <stem>_summary_confidences_{1,2,3,4}.json
+    <stem>_job_request.json
+```
+
+Three things had to be normalised before the
+`resistosome_pipeline` could ingest them:
+
+1. **Three different seed-token conventions** are used across the
+   archives:
+   - `_seed_random_<N>` (most files; seeds 2..10 of the NRC2 sweep)
+   - `_seed_<N>` (NRC2 tetramers, seed 1)
+   - `_<YYYY>_<MM>_<DD>_<HH>_<MM>` timestamp (the "seed 1" run in most
+     archives; recorded as Seed=1 in the manifest)
+2. **Each seed directory contains 5 candidate AF3 models**
+   (`model_0..model_4`). Contreras' reported stats are on `model_0`
+   only, so we keep `model_0` and discard the rest.
+3. The pipeline's seed-grouping regex is `_seed(\d+)`, which matches
+   `_seed_<N>` but not `_seed_random_<N>` or the timestamp form.
+
+The staging script `data/contreras_af3/stage.py` handles all three:
+
+```python
+# Pseudocode — see stage.py for the real regexes.
+for zip in zips/*.zip:
+    for member in zip:
+        skip __MACOSX/, ._*, full_data_*, model_{1..4}, *_seed/    # cruft
+        match member against the 3 seed-token patterns above
+        emit:  staging/<archive>/<base>_seed<N>/
+                  <base>_seed<N>_model.cif
+                  <base>_seed<N>_summary_confidences.json
+```
+
+This produced **89 (model.cif, summary_confidences.json) pairs** —
+matches the manifest exactly:
+
+```
+staging/AF_benchmark/         1 entry  (NbNRC2a hexamer, AF3)
+staging/Benchmarks/           6 entries (3 proteins × 2 stoichs)
+staging/CC/                  16 entries (8 proteins × 2 stoichs)
+staging/CCG10/               12 entries (6 proteins × 2 stoichs)
+staging/CCR/                  4 entries (2 proteins × 2 stoichs)
+staging/NRC2_{tetra..octa}mers/ 10 each = 50 entries (NbNRC2a × 5 stoichs × 10 seeds)
+```
+
+**Triple-deposited NbNRC2a hexamer.** The same `seed_random_1` /
+timestamp run for NbNRC2a hexamer appears in `AF_benchmark.zip`,
+`Benchmarks.zip` (as `nbnrc2a_ccnbarc_oleic_seed1`), and as `seed1` of
+`NRC2_hexamers.zip`. They are the same model. Notebook 004 will pick
+one canonical copy and dedupe before computing the feature matrix.
+
+## J. SNI pipeline environment and a first run
+
+**Environment** (`mamba env list` → `sni-pipeline`):
+
+```bash
+mamba create -n sni-pipeline \
+    -c https://repo.prefix.dev/conda-forge \
+    -c https://repo.prefix.dev/bioconda \
+    python=3.11 biopython=1.84 freesasa=2.2.1 numpy=1.26.3 \
+    scipy=1.15.2 pandas=2.3.3 openpyxl=3.1.5 dssp hmmer
+```
+
+(Channel URLs go through `repo.prefix.dev` for licence-compliance
+reasons; do not use the bare `-c conda-forge` form even though the
+local `~/.condarc` happens to alias it through.)
+
+**Trial run** on the 6 cryo-EM benchmark predictions (NbNRC2a /
+ZAR1 / Sr35 × {penta, hexa}):
+
+```bash
+cd SolNRCH_foldome/resistosome_pipeline
+mamba run -n sni-pipeline python run_pipeline.py \
+    --input_dir  sni_ml/data/contreras_af3/staging/Benchmarks \
+    --output_dir /tmp/sni_test_benchmarks \
+    --hmm        SolNRCH_foldome/structural_analysis/main/MADA.hmm \
+    --hmm_fallback_dssp \
+    --workers 4
+```
+
+Six structures → 16 s wallclock. All 11 canonical SNI features
+(`ipTM_LCB`, `Sum_CONTACTS`, `BSA_INT_PROTO`, `SD_THETA_ROT`,
+`S_PROTO`, `D_APEX`, `THETA_APEX_mean`, `L_APEX_mean`, `H_ABS_mean`,
+`MU_H_mean`, `D_MHD_P_mean`) computed, save for `D_MHD_P_mean`, which
+needs MHD/P-loop annotation CSVs we have only for the NRC network.
+
+First numbers (full table will be re-derived in 004; this is
+qualitative reassurance that the wiring is right):
+
+| ID | ipTM_LCB | Sum_CONTACTS | SD_θ_rot | S_proto | D_apex |
+|:---|---:|---:|---:|---:|---:|
+| **zar1 penta** ✅ | 0.63 | 299 | **0.07** | **0.03** | 12.6 |
+| zar1 hexa ❌ | 0.61 | 152 | **14.1** | **1.45** | 14.9 |
+| **nbnrc2a hexa** ✅ | 0.71 | 187 | 0.13 | 0.05 | 21.0 |
+| nbnrc2a penta ❌ | 0.66 | 186 | 0.17 | 0.07 | 18.7 |
+| **sr35 penta** ✅ | 0.64 | 208 | 0.10 | 0.07 | 20.1 |
+| sr35 hexa ❌ | 0.64 | 209 | 0.17 | 0.07 | 21.4 |
+
+Read: ZAR1 is exactly the SNI behaviour you'd hope for — a
+wrong-stoich AF3 hexamer has 200× the rotational asymmetry of the
+correct pentamer. NbNRC2a is mid-strength. **Sr35 is a clean
+non-discrimination** — AF3 builds geometrically clean pentamers *and*
+hexamers, and SNI cannot tell them apart. That single-protein
+counter-example is the kind of signal the QC analysis in 004 needs
+to characterise across the full 89-entry panel.
+
+## K. What this notebook does not do
+
+- It does not compute the full 89-entry feature matrix.
+- It does not train, evaluate, or compare any classifier.
+- It does not regrade the 002 helper/sensor labels.
+- It does not propose AF3 server runs for the gap proteins.
+
+All of those belong in notebook 004 (planned).
+
+## L. Open follow-ups
+
+- **`D_MHD_P_mean` annotation gap** for non-NRC Contreras proteins
+  (8 CC-NLRs, 6 CCG10-NLRs, 2 CCR-NLRs, ZAR1, Sr35). The NRC-network
+  CSVs at `SolNRCH_foldome/structural_analysis/main/*_coords.csv` do
+  not cover them. Either an HMM-driven motif-coord scan, or accept
+  10/11 features for those rows, or drop the metric from the QC
+  feature set.
+- **Sr35 missed the MADA HMM** in the trial run and fell back to
+  DSSP for α1, which downstreams to `THETA_APEX_mean`, `L_APEX_mean`,
+  `MU_H_mean`. Worth checking whether the existing 18-protein
+  benchmark hit HMM for Sr35 or also fell back, and what the
+  consequences are.
+- **Triple-deposited NbNRC2a hexamer**: pick a canonical copy in 004.
+- **Weak-plant scan**: 97 PMIDs still tagged `ambiguous` in the audit
+  log have not had a human pass.
+- **Metazoan calibration**: 287 PMIDs across M1+M2 still `ambiguous`.
+  None of the M-set has been promoted into a curated table yet.
+- **RPS2 PDB deposit**: re-check NCBI elink in a few weeks; the *Cell*
+  2026 deposits may not yet be fully indexed.
+
+## M. File index
+
+Everything created in this lineage, with one-line descriptions:
+
+| Path (relative to `sni_ml/`) | What |
+|:--|:--|
+| `data/known_oligomer_states_rubric.md` | v0.1 pre-registered rubric (locked 2026-04-23) |
+| `data/known_oligomer_states.csv` | curated table — 26 rows (18 benchmark + 8 literature) |
+| `data/known_oligomer_states_audit.csv` | per-PMID disposition log, 536 rows |
+| `data/pubmed_raw/` | raw esearch / esummary / efetch outputs and `triage.py` |
+| `data/pdb_lookup/` | NCBI elink → MMDB → PDB resolution outputs |
+| `data/contreras_af3/Data_S1.xlsx` | Contreras *et al.* 2024 supplementary metadata |
+| `data/contreras_af3/manifest/*.csv` | each sheet of `Data_S1.xlsx` as a CSV |
+| `data/contreras_af3/fetch.sh` | resumable Zenodo downloader for the 10 archives |
+| `data/contreras_af3/zips/` | original 14.4 GB of Zenodo archives (kept for re-staging) |
+| `data/contreras_af3/stage.py` | seed-convention normaliser; produces `staging/` |
+| `data/contreras_af3/staging/` | 89 (model.cif, summary_confidences.json) pairs |
+
+External resources cited:
+
+- Contreras *et al.* 2024, *Sci Adv* 10, eadr2594. PMID 39504373, DOI
+  `10.1126/sciadv.adr2594`.
+- Contreras *et al.* 2024, AF3-predicted NLR resistosome structures.
+  Zenodo: `10.5281/zenodo.11546022`.
+- `amiralito/NRC2Hexamer` (GitHub).
+- NCBI E-utilities (esearch, esummary, efetch, elink) and MMDB/Structure.
+- RCSB PDB (REST/JSON search API) — failed for the citation→entry
+  lookup; recorded for the next person who tries it.
+- The `resistosome_pipeline` lives at
+  `SolNRCH_foldome/resistosome_pipeline/`.

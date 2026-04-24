@@ -1,0 +1,425 @@
+---
+title: "007 — Power analysis: how many more GT proteins would we need?"
+author: "Dan MacLean"
+date: "2026-04-24"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Summary
+
+In notebook 004 we joined Contreras *et al.*'s AlphaFold-3 oligomer
+predictions to a small set of plant NLRs whose true activated
+oligomeric state is known from experiment, giving 12 rows of
+"AF3 prediction + correct answer". In 005 we asked the obvious
+follow-on: do the canonical SNI structural features tell apart the
+rows where AF3 got the oligomer right (TP) from the rows where it
+got it wrong (FP)? They didn't — a standard ranger classifier did
+no better than always guessing the majority class. In 006 we
+checked whether 005's apparent signal was at least transferring
+between proteins by training on three proteins and testing on the
+fourth; it wasn't, and the classifier collapsed to a baseline majority-class
+prediction on every fold.
+
+Our conclusion is that the classification didn't work when we have just a few 'real'
+proteins to use.  How much more data would it take before it could?
+
+
+## Goal
+
+In this document we'll examine features - different SNI values.
+
+- **§1 — How big does each feature's signal look in the current
+  data, and how sure are we?** The signal size is measured the same
+  way as in notebook 005 (rank-AUC), and the uncertainty is shown
+  as a bootstrap 95% CI so we don't pretend the point estimates
+  are exact.
+- **§2 — How many rows would a standard test need to detect a
+  signal that big?** A textbook formula (Noether 1987) converts
+  effect size + class ratio into "minimum sample size for 80%
+  power." We compute it for every feature.
+- **§3 — The same calculation as a curve.** Power vs sample size
+  for the top three features, with the current `n = 12` and the
+  80% power target both drawn on the plot, so the gap between
+  where we are and where we'd want to be is visible at a glance.
+- **§4 — From rows to proteins.** A sample-size in rows is one
+  unit; the more useful unit for future work is "how many
+  new ground-truth proteins do we need to find?". This section
+  does that conversion.
+- **§5 — Plain-language conclusion.**
+- **§6 — What we'll do next.**
+
+### Some terms
+
+- **AUC** (here, `auc_abs`) — Area Under the ROC Curve, a number
+  between 0.5 and 1.0 that says how well a feature's values
+  separate two classes when used as a 1-D ranker. **0.5** means
+  "no better than a coin flip — TP and FP rows are interleaved";
+  **1.0** means "every TP value is above every FP value (or vice
+  versa)". `auc_abs = max(AUC, 1 − AUC)` so the number is
+  direction-free.
+- **Power** — the probability that, if the feature really does
+  separate the classes by the amount we observed, a standard test
+  on a fresh sample of size `n` would correctly detect it. The
+  conventional target is 80%: "in 4 out of 5 datasets of this
+  size, the test would catch the signal."
+- **α** — the false-positive rate of the test. α = 0.05 is the
+  conventional threshold: "we'll only call a result significant if
+  it would happen by chance in fewer than 1 in 20 datasets when
+  there is actually no real signal."
+- **Bootstrap 95% CI** — because we only have 12 rows, the AUC
+  point estimate is itself uncertain. The bootstrap re-samples the
+  12 rows with replacement many times, recomputes the AUC each
+  time, and reports the 2.5%–97.5% range as a 95% confidence
+  interval. A wide CI means "the true AUC could be quite different
+  from the point estimate; the data we have can't pin it down."
+
+## Hypotheses
+
+Stated upfront so the reader can check whether what comes out of
+the analysis matches what we expected going in.
+
+1. **The bootstrap CIs on per-feature AUC will be wide,** wide
+   enough that for most features the CI overlaps AUC = 0.5
+   (no real signal). This is the concrete version of "12 rows,
+   imbalanced 3:9, can't precisely pin down an effect size."
+2. **`SD_THETA_ROT` will look strong on the point estimate** (≈ 0.96
+   in 005), so the sample-size formula will say we already have
+   enough rows. But its CI will be wide, and we already know from
+   notebook 006 that this feature's signal doesn't transfer across
+   proteins — so the headline number for this feature is a
+   misleading one to act on.
+3. **The middle-ranked features** (`ipTM_LCB`, `S_PROTO`,
+   `BSA_INT_PROTO`, `D_APEX`, AUC ≈ 0.67–0.76) will need on the
+   order of **tens of independent proteins** for 80% power.
+4. **The weakest features** (AUC ≈ 0.55) will need **hundreds to
+   thousands** of proteins, which isn't a realistic target for any
+   plant-NLR curation effort.
+
+
+We deliberately don't run a multivariate classifier power analysis
+here. At `n = 12` the per-class feature distributions are
+themselves too poorly estimated for a simulation to be meaningful;
+any classifier-power numbers it produced would just be reading
+back the assumptions we'd had to invent. The univariate Wilcoxon
+power analysis is the defensible lower bar: if even a
+single-feature test needs 50+ proteins, a multivariate classifier
+on the same features won't beat it on fewer.
+
+------------------------------------------------------------------------
+
+## Setup
+
+Same load, same dedup rule, same canonical 10 features as 005 and 006.
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(here)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(WMWssp)
+})
+
+knitr::opts_chunk$set(fig.path = "../results/figures/007_")
+
+fm <- read.csv(here("results", "004_full_run", "feature_matrix.csv"),
+               stringsAsFactors = FALSE, na.strings = c("", "NA"))
+fm$is_triple_deposit <- fm$is_triple_deposit == "True"
+fm$call_correct      <- ifelse(fm$call_correct == "True", TRUE,
+                        ifelse(fm$call_correct == "False", FALSE, NA))
+
+fm_dedup <- fm |>
+  filter(!(archive %in% c("AF_benchmark", "Benchmarks") &
+           protein == "nbnrc2a" & predicted_oligomer == 6))
+
+gt <- fm_dedup |>
+  filter(!is.na(gt_oligomer)) |>
+  mutate(class = factor(ifelse(call_correct, "TP", "FP"),
+                        levels = c("FP", "TP")))
+
+CANONICAL_10 <- c("ipTM_LCB", "Sum_CONTACTS", "BSA_INT_PROTO",
+                  "SD_THETA_ROT", "S_PROTO", "D_APEX",
+                  "THETA_APEX_mean", "L_APEX_mean", "H_ABS_mean",
+                  "MU_H_mean")
+```
+
+## 1. How big is each feature's signal how variable is it?
+
+The signal size is the rank-AUC of the feature (SNI value) treated as a
+single-feature classifier of TP vs FP, exactly as in notebook 005
+§3. The uncertainty around each estimate is the bootstrap 95% CI
+described in the jargon section. The plot at the end is the more
+important artefact than the table — it's where the reader sees that
+the point estimates are not as solid as they look.
+
+```{r auc-boot}
+auc_abs <- function(x, y, pos = "TP") {
+  m <- !is.na(x); x <- x[m]; y <- y[m]
+  np <- sum(y == pos); nn <- sum(y != pos)
+  if (np < 1 || nn < 1) return(NA_real_)
+  r  <- rank(c(x[y == pos], x[y != pos]))
+  U  <- sum(r[seq_len(np)]) - np * (np + 1) / 2
+  a  <- U / (np * nn)
+  max(a, 1 - a)
+}
+
+boot_auc_ci <- function(gt, col, n_boot = 2000, seed = 7) {
+  set.seed(seed)
+  out <- replicate(n_boot, {
+    idx <- sample(nrow(gt), replace = TRUE)
+    auc_abs(gt[[col]][idx], gt$class[idx])
+  })
+  c(lo = unname(quantile(out, 0.025, na.rm = TRUE)),
+    hi = unname(quantile(out, 0.975, na.rm = TRUE)))
+}
+
+auc_tbl <- do.call(rbind, lapply(CANONICAL_10, function(c) {
+  ci <- boot_auc_ci(gt, c)
+  data.frame(feature = c,
+             auc_abs = auc_abs(gt[[c]], gt$class),
+             ci_lo   = ci["lo"], ci_hi = ci["hi"])
+}))
+auc_tbl <- auc_tbl[order(-auc_tbl$auc_abs), ]
+knitr::kable(auc_tbl, digits = 3, row.names = FALSE)
+```
+
+```{r auc-ci-plot, fig.width=7, fig.height=4}
+ggplot(auc_tbl, aes(x = auc_abs, y = reorder(feature, auc_abs))) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey60") +
+  geom_errorbarh(aes(xmin = ci_lo, xmax = ci_hi), height = 0.25,
+                 colour = "grey50") +
+  geom_point(size = 3, colour = "#264653") +
+  labs(x = "auc_abs (0.5 = no effect, 1.0 = perfect)",
+       y = NULL,
+       subtitle = "Point estimate + bootstrap 95% CI, n = 12 rows") +
+  xlim(0.4, 1.05) +
+  theme_minimal(base_size = 10)
+```
+
+The dot is the AUC we measured on the 12 rows of SNI data
+the horizontal grey bar is the 95% CI from bootstrapping. The
+vertical dashed line at 0.5 marks "no effect." A feature whose CI
+crosses or touches the 0.5 line is one where, given how little data
+we have, the data themselves can't rule out "this feature has no
+real signal."
+
+What we see. The point-estimate ranking is the same as in 005's
+table — `SD_THETA_ROT` at the top, the α1 features at the bottom.
+What's new here is that almost every feature's CI touches or
+crosses 0.5. Only `SD_THETA_ROT`'s CI clearly excludes 0.5, and even
+its CI runs all the way up to 1.0. The take-away from §1 is the
+honest one: **every sample-size number we compute in §2 is
+conditional on the point estimate being correct, and the point
+estimates are uncertain.**
+
+## 2. How many rows would a test need to detect a signal that size?
+
+This is where the power analysis happens. The Noether (1987)
+formula converts an effect size into a sample-size requirement for
+the Wilcoxon rank test:
+
+$$
+n_{\text{total}} = \frac{(z_{\alpha/2} + z_\beta)^2}{c\,(1-c)\cdot 12\cdot (p - 0.5)^2}
+$$
+
+where `p` is the AUC, `c` is the fraction of rows in the positive
+class, `z_{α/2} = 1.96` for α = 0.05 (two-sided), and `z_β = 0.84`
+for 80% power. We don't roll our own implementation — we use the
+`WMWssp` package's `WMWssp_noether()`, which is a direct
+implementation of this formula.
+
+The intuition is the bit worth carrying away from the algebra. The
+key part is `(p − 0.5)²` in the denominator: **bigger gap from
+chance → fewer samples needed; smaller gap → quadratically more
+samples**. Halving the AUC gap (e.g. going from AUC 0.80 to AUC
+0.65 — same 0.15 distance from 0.5 either side) quadruples the
+required sample size. That's the reason a feature with
+a weak-but-real signal can need a hundred times more data than a
+feature with a strong signal.
+
+The class-ratio piece, `c(1 − c)`, is maximised at `c = 0.5`
+(balanced) and gets worse as the classes become unbalanced. That's
+why the table below shows two columns: the balanced-ideal case
+(1:1) and the unbalanced case we'd actually face if we kept the
+current 1 TP : 3 FP ratio.
+
+```{r noether}
+ssp_n <- function(auc, c_ratio, alpha = 0.05, power = 0.80) {
+  WMWssp_noether(alpha = alpha, power = power,
+                 t = c_ratio, p = auc)$N
+}
+
+n_tbl <- auc_tbl |>
+  rowwise() |>
+  mutate(n_total_1to1 = ssp_n(auc_abs, 0.5),
+         n_total_1to3 = ssp_n(auc_abs, 0.25)) |>
+  ungroup()
+knitr::kable(
+  n_tbl[, c("feature", "auc_abs", "n_total_1to1", "n_total_1to3")],
+  digits = 3, row.names = FALSE,
+  col.names = c("feature", "auc_abs",
+                "n_total (1:1 balanced)",
+                "n_total (1:3 TP:FP)"))
+```
+
+The features split cleanly into three bands at the observed point
+estimates.
+
+- **Already within reach.** `SD_THETA_ROT` (AUC ≈ 0.96) needs only
+  ~14–18 rows; we already have 12. The asterisk is enormous,
+  though: as §1 showed, the CI on this AUC is wide, and as 006
+  showed, the apparent signal is dominated by the NbNRC2a
+  stoichiometry sweep and doesn't generalise across proteins. The
+  formula's verdict on this feature is right arithmetically but
+  the wrong thing to act on biologically.
+- **Tens of proteins away.** `ipTM_LCB`, `S_PROTO`, `BSA_INT_PROTO`,
+  `D_APEX` (AUC ≈ 0.67–0.76) need ~40–130 total rows, depending on
+  the class ratio. Under the rough rule that each newly-curated
+  protein contributes one informative row (see §4), this means
+  **on the order of 40–130 more independent GT proteins**.
+- **Hundreds to thousands of rows.** `Sum_CONTACTS`, `MU_H_mean`,
+  and the three α1 features (AUC ≈ 0.52–0.63) need 200 to 10000+
+  rows. These are not realistically reachable by curating more
+  plant NLRs; they will not become detectable single-feature
+  classifiers on this task.
+
+## 3. The same calculation as a curve
+
+The table in §2 gives a number per feature, but a single number is
+hard to put into context. The plot below shows the same calculation
+as a curve — power as a function of total sample size — for the
+top three features. Two reference lines are drawn so the reading is
+direct: a horizontal dashed line at 80% power (the conventional
+target) and a vertical dashed line at our current `n = 12`.
+
+`WMWssp_noether()` returns the sample size needed for a target
+power; it doesn't return the power achievable at a given sample
+size. We get the curve by calling the package the way it wants to
+be called: sweep the target power from 0.05 to 0.999, ask the
+package what N that would require at each level, and plot the
+resulting (N, power) pairs. The package does the arithmetic.
+
+```{r power-curves, fig.width=7, fig.height=4.5}
+top3 <- head(auc_tbl$feature, 3)
+power_grid <- seq(0.05, 0.999, by = 0.005)
+
+grid <- do.call(rbind, lapply(top3, function(f) {
+  a <- auc_tbl$auc_abs[match(f, auc_tbl$feature)]
+  data.frame(
+    feature = f,
+    auc     = a,
+    power   = power_grid,
+    n_total = sapply(power_grid, function(pw)
+      WMWssp_noether(alpha = 0.05, power = pw,
+                     t = 0.25, p = a)$N)
+  )
+}))
+grid <- grid[grid$n_total <= 200, ]
+
+ggplot(grid, aes(x = n_total, y = power, colour = feature)) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = 12,  linetype = "dashed", colour = "grey70") +
+  geom_line(linewidth = 0.8) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(x = "Total sample size (at TP:FP = 1:3)", y = "Power at α = 0.05",
+       subtitle = "Dashed: 80% power target (horizontal), current n = 12 (vertical)") +
+  theme_minimal(base_size = 10)
+```
+
+The plot shows at what point the number of replicates gives you an 80%
+chance of classifying correctly. Find the feature you care about (curve
+colour), trace it across the x-axis until it crosses the
+horizontal 80% line, then read the x-value beneath the crossing.
+That x-value is the total sample size that feature would need for
+a Wilcoxon test to detect its signal in 4 out of 5 hypothetical
+datasets at the AUC we currently observe.
+
+What we see. At the current `n = 12` (vertical dashed), only
+`SD_THETA_ROT` is above the 80% target line.
+`ipTM_LCB` crosses 80% at around `n ≈ 50`; `S_PROTO` crosses it at
+around `n ≈ 60`. Both crossings assume the AUC point estimate is
+the truth, which §1's CIs say we shouldn't believe too tightly.
+
+## 4. From rows to proteins: how many new ones to curate?
+
+The numbers in §2 and §3 are in *rows*. A row count isn't directly
+useful for a curation plan — what we actually need to know is
+"how many new proteins" — so this section translates.
+
+If we assume independent proteins (not very close orthologues),
+the realistic assumption is **each new GT protein
+contributes about one informative row** — typically the AF3
+prediction of its activated state, classified as TP or FP against
+the experimental result. Under that rule of thumb, the row counts
+in §2 convert as follows:
+
+```{r row-to-protein}
+convert_tbl <- n_tbl |>
+  mutate(n_proteins_1to3 = n_total_1to3,
+         n_new_proteins  = pmax(n_total_1to3 - 4, 0)) |>
+  select(feature, auc_abs, n_total_1to3, n_proteins_1to3, n_new_proteins)
+knitr::kable(convert_tbl, digits = 3, row.names = FALSE,
+             col.names = c("feature", "auc_abs",
+                           "n total rows (1:3)",
+                           "≈ n proteins",
+                           "≈ n new proteins on top of 4"))
+```
+
+The right-hand column is the practically useful one: **how many
+plant NLRs with experimentally-resolved activated oligomeric state
+would we need to add to the four we already have to make each
+feature individually detectable** at 80% power.
+
+## 5. Summary
+
+** The data we have right now can't precisely measure the
+effect sizes themselves.** Almost every per-feature AUC's 95% CI
+touches or crosses 0.5 (no effect) — including some of the higher
+point estimates. So every sample-size number in §2 and §3 is
+conditional on the point-estimate AUC being right, and at `n = 12`
+the point estimates are not pinned down. Treat the numbers as
+"order of magnitude" guides, not as exact targets.
+
+**`SD_THETA_ROT`'s "we already have enough" verdict is real
+arithmetically but misleading biologically.** The formula is
+correct on its own terms, but most of the apparent signal comes
+from contrasting NbNRC2a's correct hexamer against four
+forced-wrong stoichiometries of the *same protein*. Notebook 006
+showed that signal doesn't transfer across proteins. Curating more
+of the same — only NbNRC2a — would not change this. What's needed
+for `SD_THETA_ROT` is independent proteins, not more rows of the
+one we have.
+
+**For the middle band of features (`ipTM_LCB`, `S_PROTO`,
+`BSA_INT_PROTO`, `D_APEX`, AUC ≈ 0.67–0.76), the realistic target
+is roughly 40–130 independent GT proteins on top of the 4 we
+have.** This is a non-trivial but reachable curation programme,
+plausibly addressable in the near term.
+
+**The weakest features won't become useful single-feature
+classifiers no matter how much more data we collect.** When the
+required sample is in the hundreds to thousands of independent
+proteins, the answer for a structural-biology curation programme
+is "this feature is not really good for this task." Of course, these
+numbers are not super strong, but it is suggestive that these features
+are not very useful in the SNI overall.
+
+
+
+## 7. Session
+
+```{r session}
+sessionInfo()
+```

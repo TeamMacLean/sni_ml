@@ -1,0 +1,9 @@
+  High adjacency distance CV (0.22) — ring order may be unreliable
+  No HMM hit for sr35_ccnbarc_penta_oleic, falling back to DSSP for α1
+  No HMM hit for sr35_ccnbarc_hexa_oleic, falling back to DSSP for α1
+  No NB-ARC annotation found for nbnrc2a_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for zar1_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for sr35_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for nbnrc2a_ccnbarc_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for zar1_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for sr35_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain

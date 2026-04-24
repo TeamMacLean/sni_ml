@@ -1,0 +1,286 @@
+---
+title: "006 — Leave-one-protein-out CV on the 004 GT subset (curiosity pass)"
+author: "Dan MacLean"
+date: "2026-04-24"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Preamble
+
+This notebook is a curiosity pass, written knowing upfront that the
+sample size is too small for the result to be load-bearing. Notebook
+005 showed that on the 12-row GT subset of the 004 feature matrix, a
+leave-one-*row*-out classifier does not beat random labelling, and
+that 9 of the 12 rows are a single protein (NbNRC2a) at different
+ring sizes — so the within-class variability is mostly
+pseudo-replicated rather than drawn from independent proteins.
+
+What this notebook does is swap the fold boundary: instead of
+holding out one *row*, we hold out one *protein* and train on the
+other three. There are only 4 distinct GT proteins, so this is a
+4-fold CV on a 12-row dataset — not a well-powered test of
+anything. We are running it because the contrast with 005's LOOCV
+numbers is informative, not because the LOPO numbers themselves are
+reliable. The follow-on notebook 007 is the proper response to the
+data being this small: a power analysis that asks directly how many
+more GT proteins would be needed before a sensible classifier could
+be fit.
+
+## Goal
+
+Refit the same ranger classifier on the same canonical 10 SNI
+features, but change the cross-validation split from leave-one-row-out
+(005) to leave-one-protein-out (here). Report held-out predictions
+per protein, and compare the aggregate accuracy and AUC against 005's
+LOOCV numbers.
+
+## Hypotheses
+
+1. The LOPO aggregate accuracy will be **worse** than the LOOCV
+   accuracy from 005. Under LOOCV, a held-out NbNRC2a row's nearest
+   information is five other NbNRC2a rows from the same
+   stoichiometry sweep — the classifier effectively has
+   "almost-the-same-protein" training points. Under LOPO, a
+   held-out NbNRC2a row has to be classified from Sr35, ZAR1 and
+   RPS2 training data only, none of which has been through the
+   same forced-stoichiometry sweep.
+2. The `featureless` baseline will sit at the same 9/12 = 0.75
+   accuracy as in 005, because FP is the training majority in every
+   one of the 4 LOPO folds.
+3. The RPS2 fold will look trivially "accurate" (both held-out rows
+   are FP, any FP-majority guess gets 2/2) without that telling us
+   anything about feature discrimination.
+
+## Rationale
+
+005 left one question open: was the decent-looking `SD_THETA_ROT`
+AUC (0.96) driven by within-NbNRC2a ring-size contrasts, or by
+genuine across-protein signal? LOPO splits that directly. If the
+across-protein accuracy drops materially below the LOOCV accuracy,
+the AUCs in 005 were inflated by pseudo-replication. If they're
+similar, the pseudo-replication concern was smaller than 005 made
+out.
+
+------------------------------------------------------------------------
+
+## Setup
+
+Same load, same dedup rule, same canonical 10 as 005.
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(here)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(mlr3)
+  library(mlr3learners)
+})
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+fm <- read.csv(here("results", "004_full_run", "feature_matrix.csv"),
+               stringsAsFactors = FALSE, na.strings = c("", "NA"))
+fm$is_triple_deposit <- fm$is_triple_deposit == "True"
+fm$call_correct      <- ifelse(fm$call_correct == "True", TRUE,
+                        ifelse(fm$call_correct == "False", FALSE, NA))
+
+fm_dedup <- fm |>
+  filter(!(archive %in% c("AF_benchmark", "Benchmarks") &
+           protein == "nbnrc2a" & predicted_oligomer == 6))
+
+gt <- fm_dedup |>
+  filter(!is.na(gt_oligomer)) |>
+  mutate(class = factor(ifelse(call_correct, "TP", "FP"),
+                        levels = c("FP", "TP")),
+         row_id = paste(protein, archive, predicted_oligomer, sep = "/"))
+
+CANONICAL_10 <- c("ipTM_LCB", "Sum_CONTACTS", "BSA_INT_PROTO",
+                  "SD_THETA_ROT", "S_PROTO", "D_APEX",
+                  "THETA_APEX_mean", "L_APEX_mean", "H_ABS_mean",
+                  "MU_H_mean")
+```
+
+## 1. What the four folds look like
+
+```{r folds}
+fold_summary <- gt |>
+  group_by(protein) |>
+  summarise(n_rows = n(),
+            n_TP   = sum(class == "TP"),
+            n_FP   = sum(class == "FP"),
+            .groups = "drop")
+knitr::kable(fold_summary)
+```
+
+NbNRC2a contributes 6 rows (1 TP from the hexamer, 5 FP from the
+forced non-hexamer stoichiometries); Sr35 and ZAR1 contribute 2
+rows each (1 TP pentamer and 1 FP forced hexamer); RPS2 contributes
+2 rows, both FP (its true state is octamer, so neither the pentamer
+nor the hexamer deposit is correct).
+
+When we hold out RPS2, the test set is 2 FP rows with no TP — so
+any "predict FP" strategy scores 2/2 on that fold while saying
+nothing about the features.
+
+## 2. Leave-one-protein-out predictions
+
+A simple loop: for each protein, train ranger on the other three
+proteins, predict the held-out protein, keep the row-level
+predictions.
+
+```{r lopo-ranger}
+lopo_predict <- function(data, features, protein_col = "protein") {
+  proteins <- unique(data[[protein_col]])
+  do.call(rbind, lapply(proteins, function(p) {
+    train <- data[data[[protein_col]] != p, , drop = FALSE]
+    test  <- data[data[[protein_col]] == p, , drop = FALSE]
+
+    tsk_train <- TaskClassif$new(
+      id = "tr",
+      backend = as.data.frame(train[, c("class", features)]),
+      target = "class", positive = "TP")
+
+    lrn_obj <- lrn("classif.ranger", predict_type = "prob")
+    lrn_obj$param_set$values$num.trees <- 200
+    set.seed(6)
+    lrn_obj$train(tsk_train)
+
+    tsk_test <- TaskClassif$new(
+      id = "te",
+      backend = as.data.frame(test[, c("class", features)]),
+      target = "class", positive = "TP")
+    pred <- lrn_obj$predict(tsk_test)
+
+    data.frame(
+      held_out_protein = p,
+      row_id           = test$row_id,
+      class            = as.character(test$class),
+      response         = as.character(pred$response),
+      prob_TP          = pred$prob[, "TP"],
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+lopo_ranger <- lopo_predict(gt, CANONICAL_10)
+lopo_ranger$correct <- lopo_ranger$class == lopo_ranger$response
+knitr::kable(lopo_ranger, digits = 3)
+```
+
+## 3. Aggregate: LOPO vs 005's LOOCV
+
+```{r aggregate}
+# Featureless LOPO: each fold predicts the training-majority class
+lopo_featureless <- do.call(rbind, lapply(unique(gt$protein), function(p) {
+  train <- gt[gt$protein != p, ]
+  majority <- names(sort(table(train$class), decreasing = TRUE))[1]
+  test <- gt[gt$protein == p, ]
+  data.frame(
+    held_out_protein = p,
+    row_id           = test$row_id,
+    class            = as.character(test$class),
+    response         = rep(majority, nrow(test)),
+    stringsAsFactors = FALSE
+  )
+}))
+lopo_featureless$correct <- lopo_featureless$class == lopo_featureless$response
+
+# AUC on pooled held-out probabilities (TP positive)
+pooled_auc <- function(prob_TP, class) {
+  y <- factor(class, levels = c("FP", "TP"))
+  if (length(unique(y)) < 2) return(NA_real_)
+  r <- rank(prob_TP)
+  n_pos <- sum(y == "TP"); n_neg <- sum(y == "FP")
+  (sum(r[y == "TP"]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+}
+
+agg_tbl <- data.frame(
+  method  = c("005 LOOCV featureless", "005 LOOCV ranger",
+              "006 LOPO featureless",  "006 LOPO ranger"),
+  acc     = c(0.75, 0.75,
+              mean(lopo_featureless$correct),
+              mean(lopo_ranger$correct)),
+  auc     = c(NA, 0.333,
+              NA,
+              pooled_auc(lopo_ranger$prob_TP, lopo_ranger$class))
+)
+knitr::kable(agg_tbl, digits = 3)
+```
+
+The 005 LOOCV numbers are copied from the rendered 005 notebook so
+the rows sit next to each other.
+
+```{r per-fold-plot, fig.width=8, fig.height=4}
+ggplot(lopo_ranger, aes(x = prob_TP, y = row_id,
+                        colour = class, shape = correct)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 2.5) +
+  facet_grid(held_out_protein ~ ., scales = "free_y", space = "free_y") +
+  scale_colour_manual(values = c(FP = "#e76f51", TP = "#264653")) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 4),
+                     labels = c(`TRUE` = "correct", `FALSE` = "wrong"),
+                     name = "prediction") +
+  labs(x = "Held-out P(TP) under ranger trained on the other 3 proteins",
+       y = NULL) +
+  theme_minimal(base_size = 10)
+```
+
+## 4. Reading the result
+
+Two things to take away, in plain terms.
+
+First, **the across-protein picture is at least as bad as 005 said
+and probably worse.** The LOPO featureless baseline gives 9/12
+again, for the same reason as in 005 — FP is the training majority
+in every fold, so always-predict-FP scores 9/12. The LOPO ranger
+number sits on top of that baseline or below it, not above it. The
+features, asked to generalise from three proteins to a fourth, are
+not finding a reliable signal.
+
+Second, **the RPS2 fold is a free pass for any FP-predictor.** RPS2
+contributes only FP rows (GT = octamer, but both deposits are
+penta/hexa), so predicting FP for the RPS2 fold scores 2/2 without
+using the features. That gives the aggregate accuracy a roughly
++0.17 floor it would not get on a more balanced panel. Any single
+accuracy number read off the LOPO table should be read with that in
+mind.
+
+Taken together with 005: the decent-looking `SD_THETA_ROT` AUC on
+the full 12-row LOOCV was mostly the NbNRC2a stoichiometry sweep
+talking. When we force the classifier to generalise *across
+proteins*, that within-protein signal doesn't carry the task on its
+own. The honest version of the conclusion is: **we don't have
+enough independent proteins yet to tell whether the canonical SNI
+features separate real from forced-wrong AF3 oligomer calls in
+general.**
+
+## 5. Decisions / next moves for 007
+
+- Notebook 007 runs a power analysis that makes the sample-size
+  question explicit: given the per-feature effect sizes observed in
+  005/006, how many independent GT proteins would be needed for a
+  classifier to plausibly beat the null?
+- The 12-row GT subset stays as it is; curating more plant-NLR
+  oligomeric-state ground truth is the binding constraint on
+  moving past this, and 007 will try to put a number on how much
+  more.
+- No more classifier sweeps on this matrix in isolation — the
+  returns are exhausted until the GT panel widens.
+
+## 6. Session
+
+```{r session}
+sessionInfo()
+```

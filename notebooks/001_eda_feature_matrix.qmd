@@ -1,0 +1,347 @@
+---
+title: "001 — EDA of the labelled SNI feature matrix"
+author: "Dan MacLean"
+date: "2026-04-23"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Goal
+
+Characterise the labelled feature matrix produced by
+`R/build_feature_matrix.R` before any supervised learning: sample
+dimensions, class balance, per-feature missingness, univariate
+class-separation, within-class distribution shapes, and inter-feature
+redundancy. Two matrices are examined in parallel: the 11-feature
+canonical SNI set (as defined in `ALL_PARAMS` of
+`SolNRCH_foldome/R/NRC_heatmap_analysis.R`) and the full 54-feature
+set of numeric columns written by the authors' `resistosome_pipeline`.
+
+## Hypotheses
+
+1. Per-feature distributions differ between helper and sensor classes.
+2. Missingness is class-correlated: α1-helix-dependent metrics
+   (`THETA_APEX_mean`, `L_APEX_mean`, `MU_H_mean`) are NA for sensor
+   proteins by construction, because sensors lack a detectable MADA
+   motif.
+3. The 54-feature full matrix contains inter-feature redundancy from
+   (raw, mean, sd, LCB/UCB) variants of the same underlying
+   structural metric.
+
+## Rationale
+
+Before fitting any classifier, visibility is needed on
+(a) what the learner will be asked to distinguish,
+(b) which features carry class information under the simplest
+    possible ranker (univariate AUC), so the relative contribution
+    of the full multivariate pipeline can later be judged,
+(c) how much of the feature matrix is inter-correlated, both to
+    inform regularisation choices in mlr3 and to support the formal
+    redundancy analysis planned for a later notebook,
+(d) whether missing-data patterns alone encode class identity —
+    directly relevant to the design choice taken in the build step
+    (option c: compare with and without α1-dependent features).
+
+------------------------------------------------------------------------
+
+## Setup
+
+```{r setup}
+library(ggplot2)
+library(tidyr)
+library(here)
+
+knitr::opts_chunk$set(fig.path = "../results/figures/001_")
+
+mat_11   <- readRDS(here("data", "feature_matrix_labelled_11.rds"))
+mat_full <- readRDS(here("data", "feature_matrix_labelled_full.rds"))
+
+CANONICAL_11 <- setdiff(names(mat_11), c("ID", "class"))
+FULL_COLS    <- setdiff(names(mat_full), c("ID", "class"))
+```
+
+## 1. Matrix inventory
+
+```{r inventory}
+dim_tbl <- data.frame(
+  matrix  = c("11-feature (canonical)", "full (all numeric)"),
+  rows    = c(nrow(mat_11), nrow(mat_full)),
+  cols    = c(length(CANONICAL_11), length(FULL_COLS))
+)
+knitr::kable(dim_tbl)
+
+table(class = mat_11$class)
+
+head(mat_11[, c("ID", "class")], 20)
+```
+
+Very low number of each class, as expected. Right number from my understanding.
+
+
+## 2. Missingness patterns
+
+### 2.1 Per-feature NA counts by class (canonical 11)
+
+Checking pattern of missingness. Some features just can't exist in some classes, may need to be accounted for. Could be a lazy way to classify.
+
+```{r na-counts-11}
+na_by_class <- function(df, cols) {
+  do.call(rbind, lapply(cols, function(col) {
+    data.frame(
+      feature  = col,
+      n_helper_NA = sum(is.na(df[df$class == "helper", col])),
+      n_sensor_NA = sum(is.na(df[df$class == "sensor", col])),
+      n_helper    = sum(df$class == "helper"),
+      n_sensor    = sum(df$class == "sensor"),
+      row.names = NULL
+    )
+  }))
+}
+
+na_tbl_11 <- na_by_class(mat_11, CANONICAL_11)
+na_tbl_11 <- na_tbl_11[order(-(na_tbl_11$n_helper_NA + na_tbl_11$n_sensor_NA)), ]
+knitr::kable(na_tbl_11, row.names = FALSE)
+```
+
+Clear missingness in sensors of some features. Note this is rotated relative to how Luedke present it, as theirs is done contrary to the conventions.
+
+### 2.2 Missingness grid (canonical 11)
+
+```{r na-grid, fig.width=8, fig.height=5}
+na_long <- pivot_longer(
+  cbind(mat_11[, c("ID", "class")], is.na(mat_11[, CANONICAL_11])),
+  cols = all_of(CANONICAL_11),
+  names_to = "feature", values_to = "is_na"
+)
+na_long$feature <- factor(na_long$feature, levels = CANONICAL_11)
+na_long$ID      <- factor(na_long$ID,
+                          levels = mat_11$ID[order(mat_11$class, mat_11$ID)])
+
+ggplot(na_long, aes(x = feature, y = ID, fill = is_na)) +
+  geom_tile(colour = "grey80") +
+  scale_fill_manual(values = c(`FALSE` = "white", `TRUE` = "black")) +
+  facet_grid(class ~ ., scales = "free_y", space = "free_y") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, fill = "NA")
+```
+
+### 2.3 Full matrix NA counts by class
+
+```{r na-counts-full}
+na_tbl_full <- na_by_class(mat_full, FULL_COLS)
+na_tbl_full <- na_tbl_full[order(-(na_tbl_full$n_helper_NA + na_tbl_full$n_sensor_NA)), ]
+knitr::kable(
+  na_tbl_full[na_tbl_full$n_helper_NA + na_tbl_full$n_sensor_NA > 0, ],
+  row.names = FALSE
+)
+```
+
+## 3. Univariate class-separation (rank AUC)
+
+Idea here is that we have two groups and just see whether each feature
+is any good on its own at separating the two groups. We use Mann-Whitney's U
+as a measure of how far apart the two groups sit on a common ranking of the
+values. Biologists usually meet AUC as the area under an ROC curve swept
+out by varying a threshold; the ranks-based form `U / (n_pos * n_neg)` used
+here is the same number, just computed differently. So 1 says the feature
+says helper, 0 says the feature says sensor, 0.5 says meh. We convert the
+AUC to be in [0.5, 1] so bigger means better ignoring sign.
+
+The AUC of each feature used as a 1-D ranker is computed as the
+Mann–Whitney U statistic divided by `n_helper * n_sensor`, with NAs
+dropped. `auc` is directional (positive class = `helper`); `auc_abs`
+= `max(auc, 1-auc)` measures raw separation regardless of direction.
+
+```{r auc-fn}
+univariate_auc <- function(x, y, positive = "helper") {
+  mask  <- !is.na(x)
+  x     <- x[mask]; y <- y[mask]
+  n_pos <- sum(y == positive); n_neg <- sum(y != positive)
+  if (n_pos < 1 || n_neg < 1) {
+    return(data.frame(auc = NA_real_, auc_abs = NA_real_,
+                      n_used = length(x), n_pos = n_pos, n_neg = n_neg,
+                      wilcox_p = NA_real_))
+  }
+  r <- rank(c(x[y == positive], x[y != positive]))
+  U <- sum(r[seq_len(n_pos)]) - n_pos * (n_pos + 1) / 2
+  auc <- U / (n_pos * n_neg)
+  p   <- tryCatch(
+    suppressWarnings(wilcox.test(x ~ y)$p.value),
+    error = function(e) NA_real_
+  )
+  data.frame(auc = auc, auc_abs = max(auc, 1 - auc),
+             n_used = length(x), n_pos = n_pos, n_neg = n_neg,
+             wilcox_p = p)
+}
+
+auc_table <- function(df, cols) {
+  do.call(rbind, lapply(cols, function(col) {
+    res <- univariate_auc(df[[col]], df$class)
+    cbind(feature = col, res)
+  }))
+}
+```
+
+### 3.1 Canonical 11
+
+```{r auc-11}
+auc_11 <- auc_table(mat_11, CANONICAL_11)
+auc_11 <- auc_11[order(-auc_11$auc_abs), ]
+knitr::kable(auc_11, row.names = FALSE, digits = 3)
+```
+
+The non-NA canonical features look to separate the two classes fairly
+cleanly on their own. Some take higher values in helpers (`ipTM_LCB`,
+`Sum_CONTACTS`, `BSA_INT_PROTO`, `D_MHD_P_mean`) and some take higher
+values in sensors (`SD_THETA_ROT`, `S_PROTO`, `D_APEX`, `H_ABS_mean`)  The three α1-helix
+features (`THETA_APEX_mean`, `L_APEX_mean`, `MU_H_mean`) are NA in every
+sensor so a 1-D AUC can't be computed for them here.
+
+### 3.2 Full matrix
+
+```{r auc-full}
+auc_full <- auc_table(mat_full, FULL_COLS)
+auc_full <- auc_full[order(-auc_full$auc_abs), ]
+knitr::kable(head(auc_full, 20), row.names = FALSE, digits = 3,
+             caption = "Top 20 features by |AUC - 0.5| + 0.5")
+```
+Lots of strong classifiers.
+
+## 4. Feature distributions by class
+
+### 4.1 Canonical 11
+
+```{r dist-11, fig.width=9, fig.height=7}
+long_11 <- pivot_longer(
+  mat_11, cols = all_of(CANONICAL_11),
+  names_to = "feature", values_to = "value"
+)
+long_11$feature <- factor(long_11$feature, levels = CANONICAL_11)
+
+ggplot(long_11, aes(x = class, y = value, colour = class)) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.8, size = 1.5, na.rm = TRUE) +
+  geom_boxplot(outlier.shape = NA, fill = NA, width = 0.4, na.rm = TRUE) +
+  facet_wrap(~ feature, scales = "free_y", ncol = 3) +
+  scale_colour_manual(values = c(sensor = "#e76f51", helper = "#264653")) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none") +
+  labs(x = NULL, y = NULL)
+```
+Lots of separation between these values in sensors and helpers.
+
+
+## 5. Inter-feature redundancy
+
+Spearman correlation is used throughout; it is rank-based, robust to
+outliers, and appropriate for the small sample size (n = 18).
+
+### 5.1 Canonical 11
+
+```{r cor-11, fig.width=7, fig.height=6}
+cor_11 <- suppressWarnings(
+  cor(mat_11[, CANONICAL_11], use = "pairwise.complete.obs", method = "spearman")
+)
+
+cor_long_11 <- as.data.frame(as.table(cor_11))
+names(cor_long_11) <- c("x", "y", "rho")
+
+ggplot(cor_long_11, aes(x = x, y = y, fill = rho)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", rho)), size = 2.8) +
+  scale_fill_gradient2(low = "#1C39BB", mid = "white", high = "#ED2939",
+                       midpoint = 0, limits = c(-1, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, fill = expression(rho))
+```
+
+High-correlation pairs (|ρ| ≥ 0.9), upper triangle only:
+
+```{r cor-pairs-11}
+upper_pairs <- function(M, threshold = 0.9) {
+  idx <- which(abs(M) >= threshold & upper.tri(M), arr.ind = TRUE)
+  if (nrow(idx) == 0) return(data.frame(a = character(), b = character(), rho = numeric()))
+  data.frame(
+    a   = rownames(M)[idx[, 1]],
+    b   = colnames(M)[idx[, 2]],
+    rho = round(M[idx], 3),
+    row.names = NULL
+  )[order(-abs(M[idx])), ]
+}
+knitr::kable(upper_pairs(cor_11, 0.9), row.names = FALSE)
+```
+
+
+The two pairs with |ρ| ≥ 0.9 look to carry largely overlapping
+information, so keeping both members of each pair probably adds little.
+Using the source attributions: `Sum_CONTACTS` (Scientist)
+pairs with `BSA_INT_PROTO` (Both), and `SD_THETA_ROT` (Both) pairs with
+`D_APEX` (Both). Neither redundant pair sits wholly within the
+Co-Scientist set.
+
+### 5.2 Full matrix
+
+```{r cor-full, fig.width=11, fig.height=10}
+cor_full <- suppressWarnings(
+  cor(mat_full[, FULL_COLS], use = "pairwise.complete.obs", method = "spearman")
+)
+
+cor_long_full <- as.data.frame(as.table(cor_full))
+names(cor_long_full) <- c("x", "y", "rho")
+
+ggplot(cor_long_full, aes(x = x, y = y, fill = rho)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#1C39BB", mid = "white", high = "#ED2939",
+                       midpoint = 0, limits = c(-1, 1), na.value = "grey90") +
+  theme_minimal(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(x = NULL, y = NULL, fill = expression(rho))
+```
+
+High-correlation pairs in the full matrix (|ρ| ≥ 0.95), upper triangle only:
+
+```{r cor-pairs-full}
+pairs_full <- upper_pairs(cor_full, 0.95)
+cat("Number of pairs with |rho| >= 0.95:", nrow(pairs_full), "\n")
+knitr::kable(head(pairs_full, 40), row.names = FALSE,
+             caption = "Top 40 of the high-correlation pairs")
+```
+
+Number of features with at least one |ρ| ≥ 0.95 partner:
+
+```{r cor-groups-full}
+hi_mask <- abs(cor_full) >= 0.95
+diag(hi_mask) <- FALSE
+hi_mask[is.na(hi_mask)] <- FALSE
+n_partners <- rowSums(hi_mask)
+sum(n_partners > 0)
+knitr::kable(
+  data.frame(feature = names(n_partners), n_high_corr_partners = unname(n_partners))[
+    order(-n_partners),
+  ],
+  row.names = FALSE
+)
+```
+
+Similar story, over 20 of the 50+ metrics are closely correlated with at least one other measure, so could usefully junk at least one of the pair.
+
+## 6. Conclusion
+
+We may need to whittle down the data we use based on this. But it looks like for the 11 we have discriminatory features we should be able to get information from.let
+
+## 7. Session
+
+```{r session}
+sessionInfo()
+```

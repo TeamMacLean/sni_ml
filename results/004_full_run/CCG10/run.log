@@ -1,0 +1,13 @@
+2026-04-24 12:49:45 [WARNING] resistosome.pipeline: HMM was provided but no α1 boundaries found — check sequence names match between structures and HMM input
+  No NB-ARC annotation found for rgc2b_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for pvr4_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rps5_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rps2_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rgc2b_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rps2_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for pvr4_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rps5_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rsv3_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for vat_ccnbarc_penta_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for rsv3_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain
+  No NB-ARC annotation found for vat_ccnbarc_hexa_oleic, falling back to first 4 helices for CC domain

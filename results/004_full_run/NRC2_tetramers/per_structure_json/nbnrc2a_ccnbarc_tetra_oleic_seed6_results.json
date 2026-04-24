@@ -1,0 +1,768 @@
+{
+  "model_name": "nbnrc2a_ccnbarc_tetra_oleic_seed6",
+  "base_id": "nbnrc2a_ccnbarc_tetra_oleic",
+  "seed": 6,
+  "n_chains": 4,
+  "chain_ids": [
+    "B",
+    "C",
+    "D",
+    "A"
+  ],
+  "ring_adjacency_distances": [
+    47.9,
+    47.0,
+    47.9,
+    45.1
+  ],
+  "ring_adjacency_cv": 0.0243,
+  "timestamp": "2026-04-24T12:50:00.589255",
+  "alpha1_source": "hmm",
+  "true_nterm_resnum": 1,
+  "raw_contact_counts": {
+    "B-C": 7,
+    "C-D": 5,
+    "D-A": 5,
+    "A-B": 11
+  },
+  "raw_bsa_values": {
+    "B-C": 217.0,
+    "C-D": 196.8,
+    "D-A": 202.8,
+    "A-B": 252.2
+  },
+  "raw_interface_angles": {
+    "B-C": 92.28,
+    "C-D": 88.92,
+    "D-A": 92.27,
+    "A-B": 86.53
+  },
+  "iptm": 0.33,
+  "contacts_lcb_within": 4.228141,
+  "bsa_lcb_within": 192.873355,
+  "sd_theta_rot": 2.4269,
+  "symmetry_rmsd": 0.346,
+  "d_apex_mean": 27.34,
+  "contacts_hbond_lcb": -0.48,
+  "contacts_salt_bridge_lcb": 0.0,
+  "contacts_hydrophobic_lcb": 2.934197,
+  "contacts_disulfide_lcb": 0.0,
+  "contacts_vdw_lcb": 1.614071,
+  "raw_contact_counts_by_type": {
+    "hydrogen_bond": {
+      "B-C": 0,
+      "C-D": 0,
+      "D-A": 0,
+      "A-B": 2
+    },
+    "salt_bridge": {
+      "B-C": 0,
+      "C-D": 0,
+      "D-A": 0,
+      "A-B": 0
+    },
+    "hydrophobic": {
+      "B-C": 4,
+      "C-D": 3,
+      "D-A": 3,
+      "A-B": 4
+    },
+    "disulfide": {
+      "B-C": 0,
+      "C-D": 0,
+      "D-A": 0,
+      "A-B": 0
+    },
+    "vdw": {
+      "B-C": 3,
+      "C-D": 2,
+      "D-A": 2,
+      "A-B": 5
+    }
+  },
+  "theta_apex_per_protomer": [
+    15.53,
+    10.2,
+    14.67,
+    12.92
+  ],
+  "l_apex_per_protomer": [
+    21,
+    21,
+    21,
+    21
+  ],
+  "h_abs_per_protomer": [
+    -0.34628571428571425,
+    -0.34628571428571425,
+    -0.34628571428571425,
+    -0.34628571428571425
+  ],
+  "mu_h_per_protomer": [
+    0.3326,
+    0.3326,
+    0.3326,
+    0.3326
+  ],
+  "alpha1_linearity_per_protomer": [
+    0.9388,
+    0.9399,
+    0.9393,
+    0.9396
+  ],
+  "alpha1_plddt_per_protomer": [
+    49.2,
+    48.67,
+    48.12,
+    49.08
+  ],
+  "d_mhd_p_per_protomer": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "d_cc_nb_linker_per_protomer": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "l_cc_nb_linker_per_protomer": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "sd_theta_apex": 2.0372,
+  "theta_apex_mean": 13.33,
+  "l_apex_mean": 21.0,
+  "h_abs_mean": -0.34628571428571425,
+  "mu_h_mean": 0.3326,
+  "alpha1_linearity_mean": 0.9393999999999999,
+  "alpha1_plddt_mean": 48.7675,
+  "d_mhd_p_mean": null,
+  "d_cc_nb_linker_mean": null,
+  "d_cc_nb_linker_sd": null,
+  "l_cc_nb_linker_mean": null,
+  "l_cc_nb_linker_sd": null,
+  "nterm_distances": {
+    "B-C": 23.48,
+    "B-D": 36.02,
+    "B-A": 26.27,
+    "C-D": 24.35,
+    "C-A": 31.84,
+    "D-A": 22.09
+  },
+  "contact_details": {
+    "B-C": [
+      {
+        "chain1": "B",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "C",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.39,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "C",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD2",
+        "distance": 3.81,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "C",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CG",
+        "distance": 3.8,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 126,
+        "resname1": "L",
+        "atom1": "CD2",
+        "chain2": "C",
+        "resnum2": 126,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.67,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "CD",
+        "chain2": "C",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.99,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "NE2",
+        "chain2": "C",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.64,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "B",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "C",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.76,
+        "contact_type": "vdw"
+      }
+    ],
+    "C-D": [
+      {
+        "chain1": "C",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "D",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.66,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "C",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "D",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD2",
+        "distance": 3.89,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "C",
+        "resnum1": 126,
+        "resname1": "L",
+        "atom1": "CD2",
+        "chain2": "D",
+        "resnum2": 126,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.78,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "C",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "NE2",
+        "chain2": "D",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.64,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "C",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "D",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.92,
+        "contact_type": "vdw"
+      }
+    ],
+    "D-A": [
+      {
+        "chain1": "D",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "A",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.58,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "D",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "A",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD2",
+        "distance": 3.91,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "D",
+        "resnum1": 126,
+        "resname1": "L",
+        "atom1": "CD2",
+        "chain2": "A",
+        "resnum2": 126,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.78,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "D",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "NE2",
+        "chain2": "A",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.59,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "D",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "A",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.93,
+        "contact_type": "vdw"
+      }
+    ],
+    "A-B": [
+      {
+        "chain1": "A",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "B",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.67,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "B",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CD2",
+        "distance": 3.93,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 122,
+        "resname1": "L",
+        "atom1": "CD1",
+        "chain2": "B",
+        "resnum2": 122,
+        "resname2": "L",
+        "atom2": "CG",
+        "distance": 3.96,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 126,
+        "resname1": "L",
+        "atom1": "CD2",
+        "chain2": "B",
+        "resnum2": 126,
+        "resname2": "L",
+        "atom2": "CD1",
+        "distance": 3.63,
+        "contact_type": "hydrophobic"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "CD",
+        "chain2": "B",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.52,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "NE2",
+        "chain2": "B",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.08,
+        "contact_type": "hydrogen_bond"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "B",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "CG",
+        "distance": 3.85,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "B",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD1",
+        "distance": 3.31,
+        "contact_type": "hydrogen_bond"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 129,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "B",
+        "resnum2": 127,
+        "resname2": "D",
+        "atom2": "OD2",
+        "distance": 3.78,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 132,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "B",
+        "resnum2": 57,
+        "resname2": "V",
+        "atom2": "CG1",
+        "distance": 3.99,
+        "contact_type": "vdw"
+      },
+      {
+        "chain1": "A",
+        "resnum1": 132,
+        "resname1": "Q",
+        "atom1": "OE1",
+        "chain2": "B",
+        "resnum2": 57,
+        "resname2": "V",
+        "atom2": "CG2",
+        "distance": 3.66,
+        "contact_type": "vdw"
+      }
+    ]
+  },
+  "contact_type_summary": {
+    "B-C": {
+      "hydrophobic": 4,
+      "vdw": 3
+    },
+    "C-D": {
+      "hydrophobic": 3,
+      "vdw": 2
+    },
+    "D-A": {
+      "hydrophobic": 3,
+      "vdw": 2
+    },
+    "A-B": {
+      "hydrogen_bond": 2,
+      "hydrophobic": 4,
+      "vdw": 5
+    }
+  },
+  "cc_helix_info": {
+    "B": [
+      {
+        "helix_index": 0,
+        "label": "\u03b11_hmm",
+        "start_resnum": 1,
+        "end_resnum": 21,
+        "length": 21,
+        "sequence": "MANVAVEFLVQNLMQLLRDNA",
+        "linearity_r2": 0.9388,
+        "mean_plddt": 49.2
+      },
+      {
+        "helix_index": 1,
+        "start_resnum": 1,
+        "end_resnum": 26,
+        "length": 26,
+        "sequence": "MANVAVEFLVQNLMQLLRDNAELIVG"
+      },
+      {
+        "helix_index": 2,
+        "start_resnum": 27,
+        "end_resnum": 51,
+        "length": 25,
+        "sequence": "VKDSAESLLQDLNDFNAFLKQTAKS"
+      },
+      {
+        "helix_index": 3,
+        "start_resnum": 55,
+        "end_resnum": 90,
+        "length": 36,
+        "sequence": "NDVHKELVKKIKTVVNSAEDAIDKFVIEAKLHKDKG"
+      },
+      {
+        "helix_index": 4,
+        "start_resnum": 91,
+        "end_resnum": 141,
+        "length": 51,
+        "sequence": "VGRFVDVKHYKRVYDVAGEIKTIRDKVKEIRLNNALDLQALQDEDQSAKGV"
+      },
+      {
+        "helix_index": 5,
+        "start_resnum": 157,
+        "end_resnum": 170,
+        "length": 14,
+        "sequence": "FEEEADKVINRLLG"
+      },
+      {
+        "helix_index": 6,
+        "start_resnum": 183,
+        "end_resnum": 199,
+        "length": 17,
+        "sequence": "MPGLGKTTLANKIYKHP"
+      },
+      {
+        "helix_index": 7,
+        "start_resnum": 200,
+        "end_resnum": 205,
+        "length": 6,
+        "sequence": "DIGYQF"
+      }
+    ],
+    "C": [
+      {
+        "helix_index": 0,
+        "label": "\u03b11_hmm",
+        "start_resnum": 1,
+        "end_resnum": 21,
+        "length": 21,
+        "sequence": "MANVAVEFLVQNLMQLLRDNA",
+        "linearity_r2": 0.9399,
+        "mean_plddt": 48.67
+      },
+      {
+        "helix_index": 1,
+        "start_resnum": 1,
+        "end_resnum": 26,
+        "length": 26,
+        "sequence": "MANVAVEFLVQNLMQLLRDNAELIVG"
+      },
+      {
+        "helix_index": 2,
+        "start_resnum": 27,
+        "end_resnum": 51,
+        "length": 25,
+        "sequence": "VKDSAESLLQDLNDFNAFLKQTAKS"
+      },
+      {
+        "helix_index": 3,
+        "start_resnum": 55,
+        "end_resnum": 90,
+        "length": 36,
+        "sequence": "NDVHKELVKKIKTVVNSAEDAIDKFVIEAKLHKDKG"
+      },
+      {
+        "helix_index": 4,
+        "start_resnum": 91,
+        "end_resnum": 141,
+        "length": 51,
+        "sequence": "VGRFVDVKHYKRVYDVAGEIKTIRDKVKEIRLNNALDLQALQDEDQSAKGV"
+      },
+      {
+        "helix_index": 5,
+        "start_resnum": 157,
+        "end_resnum": 170,
+        "length": 14,
+        "sequence": "FEEEADKVINRLLG"
+      },
+      {
+        "helix_index": 6,
+        "start_resnum": 183,
+        "end_resnum": 199,
+        "length": 17,
+        "sequence": "MPGLGKTTLANKIYKHP"
+      },
+      {
+        "helix_index": 7,
+        "start_resnum": 200,
+        "end_resnum": 205,
+        "length": 6,
+        "sequence": "DIGYQF"
+      }
+    ],
+    "D": [
+      {
+        "helix_index": 0,
+        "label": "\u03b11_hmm",
+        "start_resnum": 1,
+        "end_resnum": 21,
+        "length": 21,
+        "sequence": "MANVAVEFLVQNLMQLLRDNA",
+        "linearity_r2": 0.9393,
+        "mean_plddt": 48.12
+      },
+      {
+        "helix_index": 1,
+        "start_resnum": 1,
+        "end_resnum": 26,
+        "length": 26,
+        "sequence": "MANVAVEFLVQNLMQLLRDNAELIVG"
+      },
+      {
+        "helix_index": 2,
+        "start_resnum": 27,
+        "end_resnum": 51,
+        "length": 25,
+        "sequence": "VKDSAESLLQDLNDFNAFLKQTAKS"
+      },
+      {
+        "helix_index": 3,
+        "start_resnum": 55,
+        "end_resnum": 90,
+        "length": 36,
+        "sequence": "NDVHKELVKKIKTVVNSAEDAIDKFVIEAKLHKDKG"
+      },
+      {
+        "helix_index": 4,
+        "start_resnum": 91,
+        "end_resnum": 141,
+        "length": 51,
+        "sequence": "VGRFVDVKHYKRVYDVAGEIKTIRDKVKEIRLNNALDLQALQDEDQSAKGV"
+      },
+      {
+        "helix_index": 5,
+        "start_resnum": 157,
+        "end_resnum": 170,
+        "length": 14,
+        "sequence": "FEEEADKVINRLLG"
+      },
+      {
+        "helix_index": 6,
+        "start_resnum": 183,
+        "end_resnum": 199,
+        "length": 17,
+        "sequence": "MPGLGKTTLANKIYKHP"
+      },
+      {
+        "helix_index": 7,
+        "start_resnum": 200,
+        "end_resnum": 205,
+        "length": 6,
+        "sequence": "DIGYQF"
+      }
+    ],
+    "A": [
+      {
+        "helix_index": 0,
+        "label": "\u03b11_hmm",
+        "start_resnum": 1,
+        "end_resnum": 21,
+        "length": 21,
+        "sequence": "MANVAVEFLVQNLMQLLRDNA",
+        "linearity_r2": 0.9396,
+        "mean_plddt": 49.08
+      },
+      {
+        "helix_index": 1,
+        "start_resnum": 1,
+        "end_resnum": 26,
+        "length": 26,
+        "sequence": "MANVAVEFLVQNLMQLLRDNAELIVG"
+      },
+      {
+        "helix_index": 2,
+        "start_resnum": 27,
+        "end_resnum": 51,
+        "length": 25,
+        "sequence": "VKDSAESLLQDLNDFNAFLKQTAKS"
+      },
+      {
+        "helix_index": 3,
+        "start_resnum": 55,
+        "end_resnum": 90,
+        "length": 36,
+        "sequence": "NDVHKELVKKIKTVVNSAEDAIDKFVIEAKLHKDKG"
+      },
+      {
+        "helix_index": 4,
+        "start_resnum": 91,
+        "end_resnum": 141,
+        "length": 51,
+        "sequence": "VGRFVDVKHYKRVYDVAGEIKTIRDKVKEIRLNNALDLQALQDEDQSAKGV"
+      },
+      {
+        "helix_index": 5,
+        "start_resnum": 157,
+        "end_resnum": 170,
+        "length": 14,
+        "sequence": "FEEEADKVINRLLG"
+      },
+      {
+        "helix_index": 6,
+        "start_resnum": 183,
+        "end_resnum": 199,
+        "length": 17,
+        "sequence": "MPGLGKTTLANKIYKHP"
+      },
+      {
+        "helix_index": 7,
+        "start_resnum": 200,
+        "end_resnum": 205,
+        "length": 6,
+        "sequence": "DIGYQF"
+      }
+    ]
+  }
+}

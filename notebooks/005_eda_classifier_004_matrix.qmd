@@ -1,0 +1,652 @@
+---
+title: "005 — EDA and baseline classifier on the 004 GT-bearing feature matrix"
+author: "Dan MacLean"
+date: "2026-04-24"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  message: false
+  warning: false
+---
+
+## Goal
+
+Take the feature matrix produced in notebook 004
+(`results/004_full_run/feature_matrix.csv`, 44 rows × ~60 cols), apply
+the dedup rule recorded there, restrict to rows where the activated
+oligomeric state is known from the literature, and characterise the
+canonical 11 SNI features against the binary class
+
+- **TP**: AF3 `predicted_oligomer == gt_oligomer`
+- **FP**: AF3 `predicted_oligomer != gt_oligomer`
+
+before fitting any classifier — sample dimensions, class balance,
+per-feature missingness, univariate class-separation, within-class
+distribution shapes, and inter-feature redundancy. After the EDA, run
+the same mlr3 LOOCV + permutation-null pipeline as notebook 002 on
+the GT-bearing subset, with α1-feature handling held to a single
+strategy because every GT row has the α1 features populated.
+
+## Hypotheses
+
+1. The GT subset after dedup will have a small number of rows (≈12)
+   and an imbalanced class ratio (more FP than TP), since the 004
+   matrix carries the full NbNRC2a stoichiometry sweep (4 forced-wrong
+   stoichiometries vs 1 correct hexamer) plus pentamer/hexamer pairs
+   for Sr35, ZAR1, RPS2 (1 correct vs 1 forced for Sr35 and ZAR1, and
+   2 forced for RPS2 whose GT is octamer).
+2. `D_MHD_P_mean` will be NA across every GT row — and indeed every
+   row in the matrix — because the `--mhd_csv` annotation supplied to
+   the pipeline only lists NbNRC2a's MHD coordinates, and the
+   pipeline emits NA for proteins with no annotation rather than
+   imputing. This is the coverage gap flagged in 004 R6 / decision
+   list item 4.
+3. Of the remaining 10 canonical features, at least
+   `S_PROTO`, `D_APEX`, `SD_THETA_ROT` and `BSA_INT_PROTO` will show
+   visible TP/FP gaps in the row-wise observations from 004 R3 and
+   R4, but at n = 12 with 3 TP / 9 FP no univariate test will reach
+   conventional significance after multiple-comparison adjustment.
+4. The mlr3 LOOCV pipeline's `featureless` baseline will sit at
+   9/12 ≈ 0.75 accuracy by predicting the majority (FP) class on
+   every fold. `log_reg` will not converge stably with 10 features and
+   12 rows; `ranger` will fit but will likely not exceed the
+   permutation null distribution, because the null is constrained to
+   the same 3:9 marginal and most label shuffles will themselves
+   reach 0.75 accuracy by majority-class prediction on most folds.
+
+## Rationale
+
+n = 12 is small and the class ratio is not balanced, so the EDA is
+qualitative for almost every quantity. Despite that, the same set of
+EDA passes done in 001 (matrix inventory → missingness →
+univariate AUC → distributions → redundancy) is the right lens here
+because
+
+- (a) the 004 matrix introduces a different class question (TP vs FP
+   AF3 oligomer call) on the same canonical 11 SNI features that 001
+   ran on helper vs sensor, so the EDA pattern transfers directly;
+- (b) writing the EDA out makes explicit how thin the GT panel is,
+   which is the binding constraint on every claim in this and any
+   follow-on notebook;
+- (c) the baseline classifier section mirrors 002 so that the LOOCV
+   accuracy / AUC numbers and the permutation null are reported on
+   the same scale the helper/sensor benchmark was reported on,
+   making the two readable side-by-side in the writeup.
+
+The classifier section is included for parity with 002 rather than as
+a load-bearing result. The conclusions about feature behaviour and
+the decisions for 006 are drawn from the EDA, not from the
+classifier.
+
+------------------------------------------------------------------------
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(here)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(mlr3)
+  library(mlr3learners)
+  library(mlr3pipelines)
+  library(data.table)
+})
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+knitr::opts_chunk$set(fig.path = "../results/figures/005_")
+
+fm <- read.csv(here("results", "004_full_run", "feature_matrix.csv"),
+               stringsAsFactors = FALSE, na.strings = c("", "NA"))
+
+# pandas wrote booleans as "True"/"False" strings — coerce back
+fm$is_triple_deposit <- fm$is_triple_deposit == "True"
+fm$call_correct      <- ifelse(fm$call_correct == "True", TRUE,
+                        ifelse(fm$call_correct == "False", FALSE, NA))
+
+# 004 dedup rule: keep the NRC2_hexamers nbnrc2a hexamer (n=10 seeds);
+# drop the AF_benchmark and Benchmarks duplicates of the same model.
+fm_dedup <- fm |>
+  filter(!(archive %in% c("AF_benchmark", "Benchmarks") &
+           protein == "nbnrc2a" & predicted_oligomer == 6))
+
+gt <- fm_dedup |>
+  filter(!is.na(gt_oligomer)) |>
+  mutate(class = factor(ifelse(call_correct, "TP", "FP"),
+                        levels = c("FP", "TP")),
+         row_id = paste(protein, archive, predicted_oligomer, sep = "/"))
+
+CANONICAL_11 <- c("ipTM_LCB", "Sum_CONTACTS", "BSA_INT_PROTO",
+                  "SD_THETA_ROT", "S_PROTO", "D_APEX",
+                  "THETA_APEX_mean", "L_APEX_mean", "H_ABS_mean",
+                  "MU_H_mean", "D_MHD_P_mean")
+```
+
+## 1. Matrix inventory
+
+```{r inventory}
+dim_tbl <- data.frame(
+  matrix = c("004 raw", "004 after triple-deposit dedup",
+             "GT-bearing subset (after dedup)"),
+  rows   = c(nrow(fm), nrow(fm_dedup), nrow(gt)),
+  cols   = c(ncol(fm), ncol(fm_dedup), ncol(gt))
+)
+knitr::kable(dim_tbl)
+
+table(class = gt$class)
+
+gt |>
+  select(row_id, protein, archive, predicted_oligomer, gt_oligomer, class,
+         N_replicates) |>
+  arrange(class, protein, predicted_oligomer) |>
+  knitr::kable()
+```
+
+12 rows after dedup, 3 TP and 9 FP, as anticipated. The TP cell is
+made of one true hexamer (NbNRC2a from `NRC2_hexamers`, the 10-seed
+sweep) and two true pentamers (Sr35 and ZAR1 from `Benchmarks`). The
+FP cell is the four forced-wrong NbNRC2a stoichiometries
+(tetra/penta/hepta/octa), the NbNRC2a forced-pentamer from
+`Benchmarks`, the Sr35 forced-hexamer, the ZAR1 forced-hexamer, and
+both RPS2 deposits (whose true state is octamer, so neither the penta
+nor the hexa deposit is correct).
+
+## 2. Missingness patterns
+
+### 2.1 Per-feature NA counts by class (canonical 11)
+
+```{r na-counts-11}
+na_by_class <- function(df, cols) {
+  do.call(rbind, lapply(cols, function(col) {
+    data.frame(
+      feature  = col,
+      n_FP_NA  = sum(is.na(df[df$class == "FP", col])),
+      n_TP_NA  = sum(is.na(df[df$class == "TP", col])),
+      n_FP     = sum(df$class == "FP"),
+      n_TP     = sum(df$class == "TP"),
+      row.names = NULL
+    )
+  }))
+}
+
+na_tbl_11 <- na_by_class(gt, CANONICAL_11)
+na_tbl_11 <- na_tbl_11[order(-(na_tbl_11$n_FP_NA + na_tbl_11$n_TP_NA)), ]
+knitr::kable(na_tbl_11, row.names = FALSE)
+```
+
+`D_MHD_P_mean` is NA in every GT row. Looking at the full 44-row
+matrix it is NA in every row, full stop, not just in the GT subset:
+the `--mhd_csv` annotation supplied to the 004 pipeline only carries
+NbNRC2a coordinates and the pipeline emits NA where the lookup
+misses. Drop the feature from any per-feature analysis below — the
+"canonical 11" reduces to a "canonical 10" for everything that
+follows.
+
+The α1 features (`THETA_APEX_mean`, `L_APEX_mean`, `H_ABS_mean`,
+`MU_H_mean`) are populated for every GT row, including Sr35 and
+RPS2 (whose α1 values come from the DSSP fallback per 004 decision
+3a). No row has any other NA in the canonical set.
+
+### 2.2 Missingness grid (canonical 11, GT subset)
+
+```{r na-grid, fig.width=8, fig.height=5}
+na_long <- pivot_longer(
+  cbind(gt[, c("row_id", "class")], is.na(gt[, CANONICAL_11])),
+  cols = all_of(CANONICAL_11),
+  names_to = "feature", values_to = "is_na"
+)
+na_long$feature <- factor(na_long$feature, levels = CANONICAL_11)
+na_long$row_id  <- factor(na_long$row_id,
+                          levels = gt$row_id[order(gt$class, gt$protein,
+                                                   gt$predicted_oligomer)])
+
+ggplot(na_long, aes(x = feature, y = row_id, fill = is_na)) +
+  geom_tile(colour = "grey80") +
+  scale_fill_manual(values = c(`FALSE` = "white", `TRUE` = "black")) +
+  facet_grid(class ~ ., scales = "free_y", space = "free_y") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, fill = "NA")
+```
+
+`D_MHD_P_mean` shows as a black column across both classes; every
+other feature is white throughout. From here on the active feature
+set is the canonical 10:
+
+```{r canonical-10}
+CANONICAL_10 <- setdiff(CANONICAL_11, "D_MHD_P_mean")
+CANONICAL_10
+```
+
+## 3. Univariate class-separation (rank AUC)
+
+Same Mann–Whitney rank-AUC ranker as notebook 001:
+`U / (n_TP * n_FP)`, NAs dropped, positive class = TP. Raw AUC is
+directional (high → feature value tends to be larger in TP than FP);
+`auc_abs = max(auc, 1 - auc)` is the direction-free separation.
+
+```{r auc-fn}
+univariate_auc <- function(x, y, positive = "TP") {
+  mask  <- !is.na(x)
+  x     <- x[mask]; y <- y[mask]
+  n_pos <- sum(y == positive); n_neg <- sum(y != positive)
+  if (n_pos < 1 || n_neg < 1) {
+    return(data.frame(auc = NA_real_, auc_abs = NA_real_,
+                      n_used = length(x), n_pos = n_pos, n_neg = n_neg,
+                      wilcox_p = NA_real_))
+  }
+  r <- rank(c(x[y == positive], x[y != positive]))
+  U <- sum(r[seq_len(n_pos)]) - n_pos * (n_pos + 1) / 2
+  auc <- U / (n_pos * n_neg)
+  p   <- tryCatch(
+    suppressWarnings(wilcox.test(x ~ y)$p.value),
+    error = function(e) NA_real_
+  )
+  data.frame(auc = auc, auc_abs = max(auc, 1 - auc),
+             n_used = length(x), n_pos = n_pos, n_neg = n_neg,
+             wilcox_p = p)
+}
+
+auc_table <- function(df, cols) {
+  do.call(rbind, lapply(cols, function(col) {
+    res <- univariate_auc(df[[col]], df$class)
+    cbind(feature = col, res)
+  }))
+}
+
+auc_10 <- auc_table(gt, CANONICAL_10)
+auc_10 <- auc_10[order(-auc_10$auc_abs), ]
+knitr::kable(auc_10, row.names = FALSE, digits = 3)
+```
+
+Two things to take from this table.
+
+First, **the per-feature separation is much weaker here than in
+notebook 001's helper-vs-sensor task on the same canonical features.**
+In 001 six of the canonical features (`ipTM_LCB`, `Sum_CONTACTS`,
+`BSA_INT_PROTO`, `SD_THETA_ROT`, `S_PROTO`, `D_APEX`) ranked helpers
+above sensors *perfectly* — AUC = 1.0. Here only `SD_THETA_ROT`
+gets close to that (auc_abs ≈ 0.96), and the rest sit between 0.52
+and 0.76. Telling a real-stoichiometry call from a forced-wrong one
+is a tighter ask of these features than telling a helper protein
+from a sensor protein, and it shows.
+
+Second, **most of the rows that the AUC ranks over are NbNRC2a.**
+Five of the 12 GT rows are the NbNRC2a stoichiometry sweep
+(tetra/penta/hexa/hepta/octa, 1 TP and 4 FP); a sixth is NbNRC2a
+again from `Benchmarks` (FP). So nine of the 12 rows are different
+ring sizes of one protein, and only three rows are different
+proteins (Sr35, ZAR1, RPS2). The ranking is dominated by
+within-protein stoichiometry contrasts — really a kind of
+pseudo-replicate — rather than by independent across-protein tests.
+A feature that happens to track ring size for NbNRC2a will look
+like a strong TP/FP discriminator in this table even if it has
+nothing to say about other proteins.
+
+The α1 features sit lower in the ranking because their values
+barely move across the NbNRC2a sweep (the α1 helix doesn't really
+shift when the ring size changes), so they can't separate
+within-protein TP from within-protein FP for the protein that
+contributes most of the rows.
+
+## 4. Feature distributions by class
+
+```{r dist-10, fig.width=9, fig.height=8}
+long_10 <- pivot_longer(
+  gt, cols = all_of(CANONICAL_10),
+  names_to = "feature", values_to = "value"
+)
+long_10$feature <- factor(long_10$feature, levels = CANONICAL_10)
+
+ggplot(long_10, aes(x = class, y = value, colour = class)) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.85, size = 2, na.rm = TRUE) +
+  geom_boxplot(outlier.shape = NA, fill = NA, width = 0.4, na.rm = TRUE) +
+  facet_wrap(~ feature, scales = "free_y", ncol = 3) +
+  scale_colour_manual(values = c(FP = "#e76f51", TP = "#264653")) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none") +
+  labs(x = NULL, y = NULL)
+```
+
+With 3 TP points the boxplot whiskers carry essentially no
+information — each plot is really 3 TP dots vs 9 FP dots. Read the
+panels as scatter, not as box statistics. The features at the top of
+the AUC ranking show TP and FP point-clouds that don't overlap; the
+features at the bottom show TP dots inside the FP cloud. Keep in
+mind when reading the panels that six of the nine FP dots and one
+of the three TP dots are the same protein (NbNRC2a) at different
+ring sizes — most of the spread within a class is within-protein,
+not across proteins.
+
+## 5. Inter-feature redundancy
+
+Spearman, same as 001. The pairs found redundant on the helper/sensor
+benchmark in 001 are expected to remain redundant here (the
+correlations are between features, not between features and labels).
+
+```{r cor-10, fig.width=7, fig.height=6}
+cor_10 <- suppressWarnings(
+  cor(gt[, CANONICAL_10], use = "pairwise.complete.obs", method = "spearman")
+)
+
+cor_long_10 <- as.data.frame(as.table(cor_10))
+names(cor_long_10) <- c("x", "y", "rho")
+
+ggplot(cor_long_10, aes(x = x, y = y, fill = rho)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", rho)), size = 2.8) +
+  scale_fill_gradient2(low = "#1C39BB", mid = "white", high = "#ED2939",
+                       midpoint = 0, limits = c(-1, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, fill = expression(rho))
+```
+
+```{r cor-pairs-10}
+upper_pairs <- function(M, threshold = 0.9) {
+  idx <- which(abs(M) >= threshold & upper.tri(M), arr.ind = TRUE)
+  if (nrow(idx) == 0) return(data.frame(a = character(), b = character(),
+                                        rho = numeric()))
+  data.frame(
+    a   = rownames(M)[idx[, 1]],
+    b   = colnames(M)[idx[, 2]],
+    rho = round(M[idx], 3),
+    row.names = NULL
+  )[order(-abs(M[idx])), ]
+}
+knitr::kable(upper_pairs(cor_10, 0.9), row.names = FALSE,
+             caption = "High-correlation pairs (|rho| >= 0.9)")
+```
+
+Two points to keep in mind when reading this matrix: the NbNRC2a
+stoichiometry sweep contributes 5 of the 12 rows, all from one
+protein, so any pair of features that varies smoothly with chain
+count will look strongly correlated here just from that stoichiometry
+arc. And with n = 12 the correlation estimates have wide CIs; only
+near-perfect correlations should be acted on.
+
+## 6. Baseline classifier (mlr3 LOOCV)
+
+Same scaffolding as notebook 002, restricted to the canonical 10
+because `D_MHD_P_mean` is NA throughout. One feature subset
+(`canonical_10`) and three learners — `featureless` (no-info
+baseline), `log_reg` (linear), `ranger` (random forest, 200 trees).
+LOOCV over the 12-row GT subset, scoring accuracy as the per-fold
+mean and AUC on the pooled prediction.
+
+```{r design}
+make_task <- function(data, features, target = "class") {
+  d <- as.data.frame(data[, c(target, features), drop = FALSE])
+  TaskClassif$new(id = "sni_qc", backend = d, target = target,
+                  positive = "TP")
+}
+
+build_learner <- function(lrn_id) {
+  base <- lrn(lrn_id, predict_type = "prob")
+  if (lrn_id == "classif.ranger") base$param_set$values$num.trees <- 200
+  base
+}
+
+run_loocv <- function(data, features, lrn_id) {
+  tsk <- make_task(data, features)
+  lrn_obj <- build_learner(lrn_id)
+  rr <- suppressWarnings(resample(tsk, lrn_obj, rsmp("loo")))
+  acc_mean <- rr$aggregate(msr("classif.acc"))
+  auc_pool <- tryCatch(rr$prediction()$score(msr("classif.auc")),
+                       error = function(e) NA_real_)
+  list(rr = rr,
+       agg = c(classif.acc = unname(acc_mean),
+               classif.auc = unname(auc_pool)))
+}
+```
+
+```{r benchmark}
+LEARNERS <- c("classif.featureless", "classif.log_reg", "classif.ranger")
+
+set.seed(1)
+bench_results <- do.call(rbind, lapply(LEARNERS, function(lrn_id) {
+  res <- tryCatch(
+    run_loocv(gt, CANONICAL_10, lrn_id),
+    error = function(e) list(agg = c(classif.acc = NA_real_,
+                                     classif.auc = NA_real_))
+  )
+  data.frame(
+    cell    = "canonical_10",
+    learner = sub("^classif\\.", "", lrn_id),
+    acc     = unname(res$agg["classif.acc"]),
+    auc     = unname(res$agg["classif.auc"])
+  )
+}))
+
+knitr::kable(bench_results, digits = 3)
+```
+
+`featureless` hits 0.75 accuracy without using any feature values at
+all — it just predicts "FP" on every row, and because 9 of the 12
+rows are FP, it gets 9 right. This is the baseline to beat.
+0.75 on this data means "I learned nothing from the features"; it is
+not a 75% real classifier.
+
+`log_reg` and `ranger` are the actual attempts at a classifier using
+the 10 SNI features. What we want to see is them scoring clearly
+above 0.75. The question of whether they do is settled against the
+permutation null in section 7, not by reading this table directly
+— because at n = 12 with 9 FP, accuracies near 0.75 happen very
+easily under random labels too.
+
+```{r held-out, fig.width=8, fig.height=5}
+held_out <- function(data, features, lrn_id) {
+  tsk <- make_task(data, features)
+  lrn_obj <- build_learner(lrn_id)
+  rr <- suppressWarnings(resample(tsk, lrn_obj, rsmp("loo")))
+  pred_dt <- as.data.table(rr$prediction())
+  pred_dt$row_id <- data$row_id[pred_dt$row_ids]
+  pred_dt$class  <- data$class[pred_dt$row_ids]
+  pred_dt[, .(row_id, class, response, prob_TP = prob.TP)]
+}
+
+ho_ranger <- held_out(gt, CANONICAL_10, "classif.ranger")
+ho_ranger$learner <- "ranger"
+ho_logreg <- tryCatch({
+  d <- held_out(gt, CANONICAL_10, "classif.log_reg")
+  d$learner <- "log_reg"
+  d
+}, error = function(e) NULL)
+
+ho_all <- if (!is.null(ho_logreg)) rbind(ho_ranger, ho_logreg) else ho_ranger
+ho_all <- ho_all[order(ho_all$learner, ho_all$class, -ho_all$prob_TP)]
+knitr::kable(ho_all, digits = 3)
+
+ggplot(ho_all, aes(x = prob_TP, y = reorder(row_id, prob_TP),
+                   colour = class, shape = response == class)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 2.5) +
+  facet_wrap(~ learner) +
+  scale_colour_manual(values = c(FP = "#e76f51", TP = "#264653")) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 4),
+                     labels = c(`TRUE` = "correct", `FALSE` = "wrong"),
+                     name = "prediction") +
+  labs(x = "LOOCV held-out P(TP)", y = NULL) +
+  theme_minimal(base_size = 10)
+```
+
+The held-out plot shows where the per-row predictions sit relative to
+the 0.5 boundary. With 12 rows it is short enough to read row by row.
+
+## 7. Permutation null distribution
+
+Class labels are permuted across the 12 GT rows and the LOOCV
+pipeline is re-run on each shuffle. `n_perms = 200`, ranger learner.
+Empirical one-sided p-value is `(1 + sum(null >= obs)) / (n_perms + 1)`,
+floor 1/201 ≈ 0.005.
+
+The shuffling preserves the 3:9 marginal, so the null distribution
+itself sits not at 0.5 but at whatever accuracy the ranger pipeline
+reaches under random labels with this marginal. The null is the
+right calibration for the observed score.
+
+```{r permute}
+N_PERMS <- 200
+PERM_CACHE <- here("results", "005_permutation_results.rds")
+
+run_permutations <- function(data, features, lrn_id, n_perms, seed) {
+  set.seed(seed)
+  out <- matrix(NA_real_, nrow = n_perms, ncol = 2,
+                dimnames = list(NULL, c("acc", "auc")))
+  for (i in seq_len(n_perms)) {
+    d_perm <- data
+    d_perm$class <- sample(d_perm$class)
+    res <- tryCatch(
+      run_loocv(d_perm, features, lrn_id),
+      error = function(e) list(agg = c(classif.acc = NA_real_,
+                                       classif.auc = NA_real_))
+    )
+    out[i, ] <- c(res$agg["classif.acc"], res$agg["classif.auc"])
+  }
+  as.data.frame(out)
+}
+
+if (file.exists(PERM_CACHE)) {
+  perm_results <- readRDS(PERM_CACHE)
+  message("Loaded cached permutation results from ", PERM_CACHE)
+} else {
+  message("Running ", N_PERMS, " permutations (ranger)...")
+  t0 <- Sys.time()
+  obs   <- run_loocv(gt, CANONICAL_10, "classif.ranger")$agg
+  nulls <- run_permutations(gt, CANONICAL_10, "classif.ranger",
+                            N_PERMS, seed = 105)
+  perm_results <- list(cell = "canonical_10", obs = obs, nulls = nulls)
+  saveRDS(perm_results, PERM_CACHE)
+  message("Done in ", round(as.numeric(difftime(Sys.time(), t0, units = "secs"))),
+          " s")
+}
+```
+
+```{r permute-table}
+perm_summary <- data.frame(
+  cell          = perm_results$cell,
+  obs_acc       = unname(perm_results$obs["classif.acc"]),
+  obs_auc       = unname(perm_results$obs["classif.auc"]),
+  null_acc_mean = mean(perm_results$nulls$acc, na.rm = TRUE),
+  null_auc_mean = mean(perm_results$nulls$auc, na.rm = TRUE),
+  p_acc = (1 + sum(perm_results$nulls$acc >= perm_results$obs["classif.acc"],
+                   na.rm = TRUE)) /
+          (sum(!is.na(perm_results$nulls$acc)) + 1),
+  p_auc = (1 + sum(perm_results$nulls$auc >= perm_results$obs["classif.auc"],
+                   na.rm = TRUE)) /
+          (sum(!is.na(perm_results$nulls$auc)) + 1)
+)
+knitr::kable(perm_summary, digits = 3, row.names = FALSE)
+```
+
+```{r permute-plot, fig.width=9, fig.height=4}
+nulls_long <- data.frame(
+  metric = rep(c("acc", "auc"), each = nrow(perm_results$nulls)),
+  value  = c(perm_results$nulls$acc, perm_results$nulls$auc)
+)
+obs_long <- data.frame(
+  metric = c("acc", "auc"),
+  value  = unname(c(perm_results$obs["classif.acc"],
+                    perm_results$obs["classif.auc"]))
+)
+
+ggplot(nulls_long, aes(x = value)) +
+  geom_histogram(bins = 25, fill = "grey70", colour = "white") +
+  geom_vline(data = obs_long, aes(xintercept = value),
+             colour = "#ED2939", linewidth = 0.8) +
+  facet_wrap(~ metric, scales = "free_x") +
+  labs(x = "Score under permuted labels (red = observed)",
+       y = "Permutations") +
+  theme_minimal(base_size = 10)
+```
+
+The permutation histogram centres on about 0.75 accuracy — the
+same as the featureless baseline — because any shuffle keeps the
+9 FP vs 3 TP split, and predicting "FP for everything" gets 0.75
+no matter which rows are labelled TP. The observed ranger score
+(red line) sits inside the shuffle pile, not to the right of it.
+The p-values in the table make that formal: p_acc ≈ 0.46 and
+p_auc ≈ 0.42, both far from significance. **The ranger classifier
+fit on the 10 SNI features does not beat random labelling on this
+data.** That is the section-7 take-away in one sentence.
+
+## 8. Conclusion
+
+The short version is that **we cannot build a useful TP-vs-FP
+classifier from this data**, and three separate things combine to
+make that the case.
+
+**1. The per-feature signal is much weaker than in the
+helper/sensor benchmark.** In notebook 001, six of the canonical
+SNI features separated helpers from sensors *perfectly* (AUC = 1.0).
+In 005, on the same canonical features but asking the harder
+question "is AF3's stoichiometry call correct," only `SD_THETA_ROT`
+gets close to that kind of separation (≈ 0.96); everything else
+sits between ~0.55 and ~0.76. So even before we get to sample size,
+the features themselves are carrying less class information here
+than they did in 001.
+
+**2. The ground-truth panel is very small and dominated by one
+protein.** After the dedup rule from 004 we have 12 rows with known
+answers, but 9 of them are NbNRC2a (the 5-row stoichiometry sweep
+plus the forced-pentamer from `Benchmarks`, plus the "correct"
+hexamer) and only 3 rows are other proteins (Sr35 pentamer, ZAR1
+pentamer, and two RPS2 deposits whose true state is octameric).
+That means most of what looks like TP-vs-FP separation in the AUC
+table is really "different ring sizes of the same protein" — a
+kind of pseudo-replicate — rather than an independent
+across-protein test. The narrower across-protein cut, "given that
+AF3 predicted six chains, is that right?", is a n = 4 subset
+(1 TP, 3 FP) — too small to get any univariate AUC out of at all.
+
+**3. The classes are unbalanced and the classifier doesn't beat
+random labels.** The 3 TP / 9 FP split means a classifier that
+ignores the features entirely and always predicts "FP" already
+scores 0.75 accuracy just on the class imbalance. Random labellings
+of this data also reach 0.75 most of the time, for the same
+reason. The ranger classifier fit on the 10 SNI features lands at
+the same 0.75 accuracy (AUC 0.33) and has permutation p-values
+around 0.46 for accuracy and 0.42 for AUC — the features add
+nothing the null doesn't already give.
+
+Put together: **low n, low per-feature signal on this particular
+question, and an unbalanced class split where most of the FP side
+is pseudo-replicated within one protein.** None of these is the
+kind of thing more modelling effort fixes on its own. What would
+move the needle is more experimentally-determined NLR oligomeric
+states from independent proteins — widening the panel past the
+four we currently have — and that is a data-collection problem,
+not a classifier problem.
+
+## 9. Decisions / next moves for 006
+
+- **Class definition stays as TP vs FP `call_correct`** for any
+  follow-on classifier work in 006. The narrower
+  `predicted_oligomer == 6` subset (the 6mer-FP question proper) is
+  n = 4 in this matrix and not large enough to fit anything against.
+- **Drop `D_MHD_P_mean` from the active feature set** until and
+  unless the `--mhd_csv` annotation is extended to non-NRC proteins
+  (decision item 4a from 004). 006 should run on the canonical 10.
+- **Carry the per-seed JSONs into 006** for the NRC2 archives
+  (`results/004_full_run/NRC2_*/per_structure_json/<id>_seed<N>_results.json`):
+  the 50 per-seed NbNRC2a rows are the right input for
+  any seed-aware modelling, and they raise the effective row count
+  for the only protein with a full stoichiometry sweep.
+- **Keep `Benchmarks` Sr35 and ZAR1 pentamer rows as TP, hexamer
+  rows as FP** — the across-protein TP/FP signal that 006 is
+  supposed to test rests on these.
+
+## 10. Session
+
+```{r session}
+sessionInfo()
+```
