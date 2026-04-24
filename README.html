@@ -4600,11 +4600,11 @@ Figure 8: Power curves for the three strongest features at α = 0.05 and the ob
 <p><strong>R environment.</strong> Package versions are pinned via <code>renv</code>:</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co"># from the sni_ml/ directory</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>renv<span class="sc">::</span><span class="fu">restore</span>()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
-<p><strong>Sibling dependency.</strong> Notebooks 001–004 and <code>data/contreras_af3/run_pipeline_all.sh</code> expect the <code>SolNRCH_foldome</code> repository cloned as a sibling of <code>sni_ml</code>:</p>
+<p><strong>Sibling dependency.</strong> Notebooks 001–004 and <code>data/contreras_af3/run_pipeline_all.sh</code> expect the <a href="https://github.com/amiralito/SolNRCH_foldome"><code>SolNRCH_foldome</code></a> repository cloned as a sibling of <code>sni_ml</code>:</p>
 <pre><code>sni_paper/
 ├── sni_ml/                 # this repository
-└── SolNRCH_foldome/        # cloned separately; see its own README</code></pre>
-<p>This is the project that defines the canonical 11 SNI features and ships the <code>resistosome_pipeline</code>. We do not vendor it here.</p>
+└── SolNRCH_foldome/        # git clone https://github.com/amiralito/SolNRCH_foldome</code></pre>
+<p><code>SolNRCH_foldome</code> defines the canonical 11 SNI features and ships the <code>resistosome_pipeline</code>. We do not vendor it here.</p>
 <p><strong>Rendering.</strong> All documents are Quarto:</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">quarto</span> render README.qmd</span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">quarto</span> render notebooks/   <span class="co"># or any single notebook</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
@@ -4612,7 +4612,7 @@ Figure 8: Power curves for the three strongest features at α = 0.05 and the ob
 <div class="sourceCode" id="cb4"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> data/contreras_af3</span>
 <span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">./fetch.sh</span>        <span class="co"># resumable curl from Zenodo 11546022</span></span>
 <span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> stage.py   <span class="co"># unpack zips into staging/</span></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="ex">./run_pipeline_all.sh</span>   <span class="co"># runs SolNRCH_foldome/resistosome_pipeline</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="ex">./run_pipeline_all.sh</span>   <span class="co"># calls ../SolNRCH_foldome/resistosome_pipeline</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <p>This is only needed if you want to reproduce the contents of <code>results/004_full_run/</code> from scratch.</p>
 </section>
 
